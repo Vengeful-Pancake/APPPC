@@ -1,7 +1,9 @@
-﻿using System.Drawing.Printing;
-using APPPC.Control;
+﻿using APPPC.Control;
 using APPPC.Functions;
-using Microsoft.VisualBasic.ApplicationServices;
+using System.Diagnostics;
+using System.Net;
+using System.Text.Json;
+
 namespace APPPC
 {
     public partial class loggin : Form
@@ -17,37 +19,90 @@ namespace APPPC
             btn_username.Text = "";
             this.KeyPreview = true;
             this.KeyPress += labelInput_KeyPress;
-            this.Size = new Size(1600,900);
+            this.KeyDown += labelInput_KeyDown;
             this.MinimumSize = this.Size;
-            this.MaximumSize = this.Size;
-
+            
             // Disable maximize and resize
-            this.MaximizeBox = false;
+
+            CheckForUpdate();
 
 
 
         }
-        private void labelInput_KeyPress(object sender, KeyPressEventArgs e)
+
+
+        private async void CheckForUpdate()
         {
-            if (e.KeyChar == (char)Keys.Tab)
+            string currentVersion = Application.ProductVersion.Split('+')[0];
+
+            label2.Text = "Phiên bản " + currentVersion;
+
+            string apiUrl = "https://api.github.com/repos/Vengeful-Pancake/APPPC/releases/latest";
+
+
+            using (HttpClient client = new HttpClient())
             {
-                // Toggle between username and password fields
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("request");
+
+                HttpResponseMessage response = await client.GetAsync(apiUrl);
+                if (!response.IsSuccessStatusCode) return;
+
+                string json = await response.Content.ReadAsStringAsync();
+                var release = JsonSerializer.Deserialize<GitHubRelease>(json);
+                string latestVersion = release.tag_name.Replace("v", "");
+
+
+                if (new Version(latestVersion) > new Version(currentVersion))
+                {
+                    var result = MessageBox.Show($"Đã có phiên bản {latestVersion} mới hơn. Tải về cập nhập và sử dụng?", "Cập nhập!", MessageBoxButtons.YesNo);
+                    if (result == DialogResult.Yes)
+                    {
+                        var installer = release.assets.FirstOrDefault(a => a.name.EndsWith(".msi"));
+                        var installer2 = release.assets.FirstOrDefault(a => a.name.EndsWith(".exe"));
+                        if (installer != null && installer2 != null)
+                        {
+                            string tempFile = Path.Combine(Path.GetTempPath(), installer.name);
+                            string tempFile2 = Path.Combine(Path.GetTempPath(), installer2.name);
+                            using (var wc = new WebClient())
+                            {
+                                wc.DownloadFile(installer.browser_download_url, tempFile);
+                                wc.DownloadFile(installer2.browser_download_url, tempFile2);
+                            }
+
+                            Process.Start(tempFile2);
+                            Application.Exit();
+                        }
+                    }
+                }
+            }
+        }
+
+        private void labelInput_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
                 if (current == "username")
                 {
-                    btn_password_Click(null, null); // switch to password input
+                    btn_password.BackgroundImage = Properties.Resources.l11;
+                    btn_username.BackgroundImage = Properties.Resources.l00;
+                    current = "password";
                 }
                 else
                 {
-                    btn_username_Click(null, null); // switch to username input
+                    btn_username.BackgroundImage = Properties.Resources.l01;
+                    btn_password.BackgroundImage = Properties.Resources.l10;
+                    current = "username";
                 }
-                e.Handled = true; // prevent default tab behavior
-            }
 
-            if (e.KeyChar == (char)Keys.Enter)
-            {
-                btn_login_Click(null, null); // simulate login button click
                 e.Handled = true;
             }
+
+        }
+
+
+        private void labelInput_KeyPress(object sender, KeyPressEventArgs e)
+        {
+
 
             if (current == "password")
             {
@@ -127,7 +182,7 @@ namespace APPPC
                     // Add all users
                     Session.User_s = Control.SQL.GetUsers();
                 }
-                else if (int.Parse(matchedUser.Quyenhan) == 1)
+                else if (int.Parse(matchedUser.Quyenhan) < 4)
                 {
                     // Add only the current user
                     Session.User_s = users.Where(u => u.Msnv == matchedUser.Msnv).ToList();
@@ -158,5 +213,23 @@ namespace APPPC
         {
 
         }
+
+        private void MainMenuForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            Application.Exit();
+        }
     }
+    public class GitHubRelease
+    {
+        public string tag_name { get; set; }
+        public GitHubAsset[] assets { get; set; }
+    }
+
+    public class GitHubAsset
+    {
+        public string name { get; set; }
+        public string browser_download_url { get; set; }
+    }
+
+
 }

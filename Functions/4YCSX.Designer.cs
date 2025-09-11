@@ -41,7 +41,7 @@
             // 
             tab6.BackgroundImage = Properties.Resources.bar;
             tab6.FlatAppearance.BorderSize = 0;
-            tab6.Font = new Font("Comic Sans MS", 11.25F);
+            tab6.Font = new Font("Arial", 11.25F);
             tab6.ForeColor = SystemColors.Window;
             tab6.Location = new Point(1042, 70);
             tab6.Name = "tab6";
@@ -54,7 +54,7 @@
             // 
             tab5.BackgroundImage = Properties.Resources.bar;
             tab5.FlatAppearance.BorderSize = 0;
-            tab5.Font = new Font("Comic Sans MS", 11.25F);
+            tab5.Font = new Font("Arial", 11.25F);
             tab5.ForeColor = SystemColors.Window;
             tab5.Location = new Point(836, 70);
             tab5.Name = "tab5";
@@ -67,7 +67,7 @@
             // 
             tab4.BackgroundImage = Properties.Resources.bar;
             tab4.FlatAppearance.BorderSize = 0;
-            tab4.Font = new Font("Comic Sans MS", 11.25F);
+            tab4.Font = new Font("Arial", 11.25F);
             tab4.ForeColor = SystemColors.Window;
             tab4.Location = new Point(630, 70);
             tab4.Name = "tab4";
@@ -80,7 +80,7 @@
             // 
             tab3.BackgroundImage = Properties.Resources.bar;
             tab3.FlatAppearance.BorderSize = 0;
-            tab3.Font = new Font("Comic Sans MS", 11.25F);
+            tab3.Font = new Font("Arial", 11.25F);
             tab3.ForeColor = SystemColors.Window;
             tab3.Location = new Point(424, 70);
             tab3.Name = "tab3";
@@ -93,7 +93,7 @@
             // 
             tab2.BackgroundImage = Properties.Resources.bar;
             tab2.FlatAppearance.BorderSize = 0;
-            tab2.Font = new Font("Comic Sans MS", 11.25F);
+            tab2.Font = new Font("Arial", 11.25F);
             tab2.ForeColor = SystemColors.Window;
             tab2.Location = new Point(218, 70);
             tab2.Name = "tab2";
@@ -105,10 +105,10 @@
             // label1
             // 
             label1.AutoSize = true;
-            label1.Font = new Font("Comic Sans MS", 18F, FontStyle.Bold, GraphicsUnit.Point, 0);
+            label1.Font = new Font("Arial", 18F, FontStyle.Bold, GraphicsUnit.Point, 0);
             label1.Location = new Point(2, 26);
             label1.Name = "label1";
-            label1.Size = new Size(84, 35);
+            label1.Size = new Size(81, 29);
             label1.TabIndex = 16;
             label1.Text = "label1";
             // 
@@ -116,7 +116,7 @@
             // 
             tab1.BackgroundImage = Properties.Resources.bar;
             tab1.FlatAppearance.BorderSize = 0;
-            tab1.Font = new Font("Comic Sans MS", 11.25F);
+            tab1.Font = new Font("Arial", 11.25F);
             tab1.ForeColor = SystemColors.Window;
             tab1.Location = new Point(12, 70);
             tab1.Name = "tab1";

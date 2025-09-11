@@ -15,6 +15,11 @@ namespace APPPC.Functions
         public NSLD()
         {
             InitializeComponent();
+            this.Dock = DockStyle.Fill;
+        }
+        private void NSLD_panel_SizeChanged(object sender, EventArgs e)
+        {
         }
     }
+    
 }

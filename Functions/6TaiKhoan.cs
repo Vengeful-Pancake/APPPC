@@ -1,14 +1,6 @@
 ﻿using APPPC.Control;
 using Microsoft.Data.SqlClient;
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
 
 namespace APPPC.Functions
 {
@@ -17,6 +9,7 @@ namespace APPPC.Functions
         public TaiKhoan()
         {
             InitializeComponent();
+            this.Dock = DockStyle.Fill;
             load();
 
         }
@@ -25,36 +18,13 @@ namespace APPPC.Functions
         {
             if (int.Parse(Session.CurrentUser.Quyenhan) <= 4)
             {
-                group.Visible = false;
-                leaders.Visible = false;
-                members.Visible = false;
-                infochange.Visible = false;
-                chosengroup.Visible = false;
-                chosenleader.Visible = false;
-                chosenMSNV.Visible = false;
-                comboBox1.Visible = false;
-                comboBox2.Visible = false;
-                comboBox3.Visible = false;
-                comboBox4.Visible = false;
-                comboBox5.Visible = false;
-                comboBox6.Visible = false;
-                comboBox7.Visible = false;
-                comboBox9.Visible = false;
-                comboBox10.Visible = false;
-                adddescript.Visible = false;
-                addgroup.Visible = false;
-                addleader.Visible = false;
-                addmember.Visible = false;
-                addmsnv.Visible = false;
-                addname.Visible = false;
-                deletedmember.Visible = false;
-                deletemember.Visible = false;
-                btnAddMember.Visible = false;
-                btnDeleteMember.Visible = false;
-                btnChangeInfo.Visible = false;
-                checkBox1.Visible = false;
-                newgroup.Visible = false;
+                System.Windows.Forms.Control[] controlsToHide = new System.Windows.Forms.Control[]
+                {
+                    group, leaders, members, infochange, chosengroup, chosenleader, chosenMSNV, comboBox1, comboBox2, comboBox3, comboBox4, comboBox5, comboBox6, comboBox9, adddescript, addgroup, addleader, addmember, addmsnv, addname, deletedmember, deletemember, btnAddMember, btnDeleteMember, btnChangeInfo, checkBox1, newgroup
+                };
 
+                foreach (var control in controlsToHide)
+                    control.Visible = false;
             }
             else
             {
@@ -83,8 +53,21 @@ namespace APPPC.Functions
                 comboBox9.ValueMember = "Value";
                 comboBox9.DataSource = items;
 
+                comboBox6.Items.Clear();
+                comboBox6.Items.AddRange(new object[] { "1", "2", "3", "4", "5" });
 
+                comboBox4.Items.Clear();
+                foreach (var user in Session.User_s.Where(u => int.Parse(u.Quyenhan) > 3))
+                {
+                    comboBox4.Items.Add($"{user.Msnv} - {user.Hoten}");
+                }
 
+                comboBox5.Items.Clear();
+                var groupList = Session.User_s.Select(u => u.Nhom).Distinct().OrderBy(n => n);
+                foreach (var nhom in groupList)
+                {
+                    comboBox5.Items.Add(nhom);
+                }
 
                 // Load full leader data
                 List<(string MSNV, string HoTen, string NhomFinal)> leaderData = new List<(string, string, string)>();
@@ -128,6 +111,9 @@ namespace APPPC.Functions
                 }
 
                 leaders.DataSource = dt;
+                leaders.Columns[0].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
+                leaders.Columns[1].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
+                leaders.Columns[2].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
 
 
@@ -142,7 +128,7 @@ namespace APPPC.Functions
 
         private void btnChangePass_Click(object sender, EventArgs e)
         {
-            if (old_pass.Text == Session.CurrentUser.Matkhau && newpass.Text == newpass2.Text && old_pass.Text != "" )
+            if (old_pass.Text == Session.CurrentUser.Matkhau && newpass.Text == newpass2.Text && old_pass.Text != "")
             {
                 SQL.SaveValue("MatKhau", newpass.Text);
                 old_pass.Text = "";
@@ -161,13 +147,127 @@ namespace APPPC.Functions
 
         private void btnChangeInfo_Click(object sender, EventArgs e)
         {
+        }
+        private string RemoveDiacritics(string text)
+        {
+            var normalizedString = text.Normalize(System.Text.NormalizationForm.FormD);
+            var stringBuilder = new System.Text.StringBuilder();
 
+            foreach (var c in normalizedString)
+            {
+                var unicodeCategory = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+                if (unicodeCategory != System.Globalization.UnicodeCategory.NonSpacingMark)
+                {
+                    if (c == 'đ') stringBuilder.Append('d');
+                    else if (c == 'Đ') stringBuilder.Append('D');
+                    else stringBuilder.Append(c);
+                }
+            }
+
+            return stringBuilder.ToString().Normalize(System.Text.NormalizationForm.FormC);
         }
 
         private void btnAddMember_Click(object sender, EventArgs e)
         {
+            string msnv = textBox2.Text.Trim();
+            string name = textBox1.Text.Trim();
+            string chucvu = textBox3.Text.Trim();
+            string quyen = comboBox6.SelectedItem?.ToString();
+            string nhom = comboBox5.SelectedItem?.ToString();
+            string leaderMSNV = comboBox4.SelectedItem?.ToString()?.Split('-')[0]?.Trim();
+            bool isNewGroup = newgroup.Checked;
 
+            if (string.IsNullOrWhiteSpace(msnv))
+            {
+                MessageBox.Show("Vui lòng nhập MSNV.");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                MessageBox.Show("Vui lòng chọn Tên.");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(chucvu))
+            {
+                MessageBox.Show("Vui lòng chọn Chức Vụ.");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(quyen))
+            {
+                MessageBox.Show("Vui lòng chọn Quyền hạn.");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(nhom) && !isNewGroup)
+            {
+                MessageBox.Show("Vui lòng chọn Nhóm hoặc đánh dấu 'Tạo nhóm mới'.");
+                return;
+            }
+
+            if (Session.User_s.Any(u => u.Msnv == msnv))
+            {
+                MessageBox.Show("MSNV đã tồn tại.");
+                return;
+            }
+
+            int groupNumber = 0;
+            int.TryParse(nhom, out groupNumber);
+
+            using (SqlConnection conn = new SqlConnection(SQL.GetConnectionString()))
+            {
+                conn.Open();
+
+                if (isNewGroup)
+                {
+                    SqlCommand getMaxGroup = new SqlCommand("SELECT ISNULL(MAX(Nhom), 0) + 1 FROM Users", conn);
+                    groupNumber = Convert.ToInt32(getMaxGroup.ExecuteScalar());
+                    quyen = "4"; // auto assign leader
+                }
+                else if (!string.IsNullOrEmpty(leaderMSNV))
+                {
+                    SqlCommand getLeaderGroup = new SqlCommand("SELECT ISNULL(Nhom_OVW, Nhom) FROM Users WHERE MSNV = @msnv", conn);
+                    getLeaderGroup.Parameters.AddWithValue("@msnv", leaderMSNV);
+                    object val = getLeaderGroup.ExecuteScalar();
+                    groupNumber = Convert.ToInt32(val);
+                }
+
+                // ✅ Get ToNhom for the group
+                SqlCommand getToNhomCmd = new SqlCommand("SELECT TOP 1 ToNhom FROM Users WHERE Nhom = @nhom", conn);
+                getToNhomCmd.Parameters.AddWithValue("@nhom", groupNumber);
+                string toNhom = (getToNhomCmd.ExecuteScalar()?.ToString()) ?? "";
+                string taikhoan = RemoveDiacritics(name.Trim().ToLower()).Replace(" ","");
+
+                SqlCommand insert = new SqlCommand(@"
+            INSERT INTO Users (MSNV, HoTen, QuyenHan, Nhom, ChucVu, ToNhom, TaiKhoan, MatKhau)
+            VALUES (@msnv, @hoten, @quyenhan, @nhom, @chucvu, @tonhom, @taikhoan, 123456)", conn);
+
+                if (!int.TryParse(msnv, out int parsedMSNV))
+                {
+                    MessageBox.Show("MSNV không hợp lệ.");
+                    return;
+                }
+
+                insert.Parameters.AddWithValue("@msnv", parsedMSNV);
+                insert.Parameters.AddWithValue("@hoten", name);
+                insert.Parameters.AddWithValue("@quyenhan", int.Parse(quyen));
+                insert.Parameters.AddWithValue("@nhom", groupNumber);
+                insert.Parameters.AddWithValue("@chucvu", chucvu);
+                insert.Parameters.AddWithValue("@tonhom", toNhom);
+                insert.Parameters.AddWithValue("@taikhoan", taikhoan);
+
+                try
+                {
+                    insert.ExecuteNonQuery();
+                    MessageBox.Show("Thêm nhân viên thành công.");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Lỗi khi thêm nhân viên: " + ex.Message);
+                }
+            }
+
+            load();
         }
+
 
         private void btnDeleteMember_Click(object sender, EventArgs e)
         {
@@ -207,6 +307,7 @@ namespace APPPC.Functions
                     MessageBox.Show("Lỗi khi xoá nhân viên: " + ex.Message, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+            load();
         }
 
 
@@ -228,7 +329,7 @@ namespace APPPC.Functions
                         SELECT MSNV, HoTen
                         FROM Users
                         WHERE 
-                            (Nhom = @nhom OR Nhom_OVW = @nhom)
+                            (Nhom = @nhom)
                             AND (NghiViec IS NULL OR NghiViec = 0)", conn);
                     cmd.Parameters.AddWithValue("@nhom", selectedNhom);
 
@@ -252,15 +353,73 @@ namespace APPPC.Functions
                 }
 
                 members.DataSource = dtMembers;
+                members.Columns[0].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells; // MSNV
+                members.Columns[1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;     // HoTen
+
             }
         }
 
-        private void comboBox10_SelectedIndexChanged(object sender, EventArgs e)
+
+        private void leaders_CellContentClick_1(object sender, DataGridViewCellEventArgs e)
         {
 
         }
 
-        private void leaders_CellContentClick_1(object sender, DataGridViewCellEventArgs e)
+        private void comboBox6_SelectedIndexChanged(object sender, EventArgs e) //add-quyen
+        {
+
+        }
+
+        private void textBox2_TextChanged(object sender, EventArgs e) //add-MSNV
+        {
+
+        }
+
+        private void textBox1_TextChanged(object sender, EventArgs e) //add-name
+        {
+
+        }
+
+        private void comboBox5_SelectedIndexChanged(object sender, EventArgs e) //add-nhom
+        {
+
+        }
+
+        private void comboBox4_SelectedIndexChanged(object sender, EventArgs e) //add-leader
+        {
+            if (newgroup.Checked || comboBox4.SelectedItem == null) return;
+
+            string selected = comboBox4.SelectedItem.ToString();
+            string leaderMSNV = selected.Split('-')[0].Trim();
+
+            using (SqlConnection conn = new SqlConnection(SQL.GetConnectionString()))
+            {
+                conn.Open();
+                SqlCommand cmd = new SqlCommand("SELECT ISNULL(Nhom_OVW, Nhom) FROM Users WHERE MSNV = @msnv", conn);
+                cmd.Parameters.AddWithValue("@msnv", leaderMSNV);
+                object val = cmd.ExecuteScalar();
+                comboBox5.Text = val?.ToString();
+            }
+        }
+
+        private void newgroup_CheckedChanged(object sender, EventArgs e) //add-newgroup
+        {
+            if (newgroup.Checked)
+            {
+                comboBox5.Enabled = false; // nhom
+                comboBox4.Enabled = false; // leader
+                textBox3.Enabled = false;
+            }
+            else
+            {
+                comboBox5.Enabled = true;
+                comboBox4.Enabled = true;
+                textBox3.Enabled = true;
+            }
+
+        }
+
+        private void textBox3_TextChanged(object sender, EventArgs e)
         {
 
         }

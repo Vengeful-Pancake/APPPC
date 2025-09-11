@@ -32,6 +32,7 @@
             btn_username = new Button();
             btn_login = new Button();
             button1 = new Button();
+            label2 = new Label();
             SuspendLayout();
             // 
             // btn_password
@@ -43,7 +44,7 @@
             btn_password.FlatAppearance.MouseDownBackColor = Color.Transparent;
             btn_password.FlatAppearance.MouseOverBackColor = Color.Transparent;
             btn_password.FlatStyle = FlatStyle.Flat;
-            btn_password.Font = new Font("Comic Sans MS", 14.25F);
+            btn_password.Font = new Font("Arial", 14.25F, FontStyle.Regular, GraphicsUnit.Point, 0);
             btn_password.ForeColor = Color.Transparent;
             btn_password.Location = new Point(606, 637);
             btn_password.Margin = new Padding(4, 3, 4, 3);
@@ -66,7 +67,7 @@
             btn_username.FlatAppearance.MouseDownBackColor = Color.Transparent;
             btn_username.FlatAppearance.MouseOverBackColor = Color.Transparent;
             btn_username.FlatStyle = FlatStyle.Flat;
-            btn_username.Font = new Font("Comic Sans MS", 14.25F);
+            btn_username.Font = new Font("Arial", 14.25F, FontStyle.Regular, GraphicsUnit.Point, 0);
             btn_username.ForeColor = Color.Transparent;
             btn_username.Location = new Point(606, 583);
             btn_username.Margin = new Padding(4, 3, 4, 3);
@@ -89,7 +90,7 @@
             btn_login.FlatAppearance.MouseDownBackColor = Color.Transparent;
             btn_login.FlatAppearance.MouseOverBackColor = Color.Transparent;
             btn_login.FlatStyle = FlatStyle.Flat;
-            btn_login.Font = new Font("Comic Sans MS", 14.25F);
+            btn_login.Font = new Font("Arial", 14.25F, FontStyle.Regular, GraphicsUnit.Point, 0);
             btn_login.ForeColor = Color.Transparent;
             btn_login.Location = new Point(738, 717);
             btn_login.Margin = new Padding(4, 3, 4, 3);
@@ -113,27 +114,43 @@
             button1.UseVisualStyleBackColor = true;
             button1.Click += button1_Click;
             // 
+            // label2
+            // 
+            label2.AutoSize = true;
+            label2.BackColor = Color.Transparent;
+            label2.Font = new Font("Comic Sans MS", 8.25F, FontStyle.Regular, GraphicsUnit.Point, 0);
+            label2.ForeColor = SystemColors.ButtonHighlight;
+            label2.Location = new Point(12, 9);
+            label2.Name = "label2";
+            label2.Size = new Size(56, 15);
+            label2.TabIndex = 5;
+            label2.Text = "phiên bản";
+            // 
             // loggin
             // 
             AcceptButton = btn_login;
             AutoScaleDimensions = new SizeF(12F, 26F);
             AutoScaleMode = AutoScaleMode.Font;
             BackgroundImage = Properties.Resources.login;
+            BackgroundImageLayout = ImageLayout.Stretch;
             ClientSize = new Size(1600, 900);
+            Controls.Add(label2);
             Controls.Add(button1);
             Controls.Add(btn_login);
             Controls.Add(btn_username);
             Controls.Add(btn_password);
+            DoubleBuffered = true;
             Font = new Font("Comic Sans MS", 14.25F);
-            FormBorderStyle = FormBorderStyle.None;
+            FormBorderStyle = FormBorderStyle.FixedSingle;
             Margin = new Padding(6);
-            MaximizeBox = false;
-            MinimizeBox = false;
             Name = "loggin";
+            SizeGripStyle = SizeGripStyle.Show;
             StartPosition = FormStartPosition.CenterScreen;
-            Text = "DA";
+            Text = "Management";
+            FormClosing += MainMenuForm_FormClosing;
             Load += loggin_Load;
             ResumeLayout(false);
+            PerformLayout();
         }
 
         #endregion
@@ -143,5 +160,6 @@
         private Button btn_username;
         private Button btn_login;
         private Button button1;
+        private Label label2;
     }
 }

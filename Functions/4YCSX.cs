@@ -12,17 +12,6 @@ using System;
 using System.IO;
 using System.Windows.Forms;
 
-//namespace MapPickerApp
-//{
-//    public partial class MainForm : Form
-//    {
-
-
-
-
-//    }
-//}
-
 namespace APPPC.Functions
 {
     public partial class YCSX : UserControl
@@ -30,6 +19,7 @@ namespace APPPC.Functions
         public YCSX()
         {
             InitializeComponent();
+            this.Dock = DockStyle.Fill;
         }
 
         private void YCSX_Load(object sender, EventArgs e)
@@ -49,6 +39,9 @@ namespace APPPC.Functions
         private void tab1_Click(object sender, EventArgs e)
         {
 
+        }
+        private void YCSX_panel_SizeChanged(object sender, EventArgs e)
+        {
         }
     }
 }

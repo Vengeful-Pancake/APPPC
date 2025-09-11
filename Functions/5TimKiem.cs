@@ -15,6 +15,10 @@ namespace APPPC.Functions
         public TimKiem()
         {
             InitializeComponent();
+            this.Dock = DockStyle.Fill;
+        }
+        private void TK_panel_SizeChanged(object sender, EventArgs e)
+        {
         }
     }
 }
