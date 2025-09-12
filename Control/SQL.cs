@@ -466,9 +466,12 @@ namespace APPPC.Control
                 string lsx = (r["LSX"]?.ToString() ?? "").Trim();
                 if (string.IsNullOrEmpty(lsx)) continue;
 
-                bool planned = r.Table.Columns.Contains("Date") && r["Date"] != DBNull.Value && Convert.ToBoolean(r["Date"]);
+                bool planned = r.Table.Columns.Contains("Date")
+                               && r["Date"] != DBNull.Value
+                               && Convert.ToBoolean(r["Date"]);
                 short? seq = null;
-                if (r["sequence"] != DBNull.Value && short.TryParse(r["sequence"].ToString(), out var s) && s > 0) seq = s;
+                if (r["sequence"] != DBNull.Value &&
+                    short.TryParse(r["sequence"]?.ToString(), out var s) && s > 0) seq = s;
 
                 string ka = (r["ka"]?.ToString() ?? "").Trim();
 
@@ -480,14 +483,14 @@ namespace APPPC.Control
                         : fallbackDate.Date;
 
                     using var up = new SqlCommand(@"
-                MERGE dbo.Machine AS t
-                USING (SELECT @LSX AS LSX) AS s ON t.LSX = s.LSX
-                WHEN MATCHED THEN 
-                    UPDATE SET t.Machine_ID=@MID, t.[Date]=@D, t.[Order]=@Seq,
-                               t.Ka=@Ka, t.[new]=@NewDay, t.[skip]=@SkipDays
-                WHEN NOT MATCHED THEN
-                    INSERT (LSX, Machine_ID, [Date], [Order], Ka, [new], [skip])
-                    VALUES (@LSX, @MID, @D, @Seq, @Ka, @NewDay, @SkipDays);", conn, tx);
+                        MERGE dbo.Machine AS t
+                        USING (SELECT @LSX AS LSX) AS s ON t.LSX = s.LSX
+                        WHEN MATCHED THEN 
+                            UPDATE SET t.Machine_ID=@MID, t.[Date]=@D, t.[Order]=@Seq, t.Ka=@Ka
+                        WHEN NOT MATCHED THEN
+                            INSERT (LSX, Machine_ID, [Date], [Order], Ka)
+                            VALUES (@LSX, @MID, @D, @Seq, @Ka);", conn, tx);
+
                     up.Parameters.Add("@LSX", SqlDbType.NChar, 10).Value = lsx;
                     up.Parameters.Add("@MID", SqlDbType.NChar, 10).Value = machineId.Trim();
                     up.Parameters.Add("@D", SqlDbType.DateTime).Value = useDate;
@@ -497,11 +500,11 @@ namespace APPPC.Control
                 }
                 else
                 {
-                    // Unplan but keep Ka/new/skip so we don't lose user's choice
                     using var up = new SqlCommand(@"
-                UPDATE dbo.Machine 
-                SET [Date]=NULL, [Order]=NULL, Ka=@Ka, [new]=@NewDay, [skip]=@SkipDays
-                WHERE LSX=@LSX AND Machine_ID=@MID;", conn, tx);
+                        UPDATE dbo.Machine
+                           SET [Date]=NULL, [Order]=NULL, Ka=@Ka
+                         WHERE LSX=@LSX AND Machine_ID=@MID;", conn, tx);
+
                     up.Parameters.Add("@LSX", SqlDbType.NChar, 10).Value = lsx;
                     up.Parameters.Add("@MID", SqlDbType.NChar, 10).Value = machineId.Trim();
                     up.Parameters.Add("@Ka", SqlDbType.NVarChar, 30).Value = string.IsNullOrEmpty(ka) ? (object)DBNull.Value : ka;
@@ -511,6 +514,7 @@ namespace APPPC.Control
 
             tx.Commit();
         }
+
 
 
 

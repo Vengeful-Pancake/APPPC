@@ -7,6 +7,12 @@ using System.ComponentModel;
 using System.Data;
 using System.Globalization;
 using System.Text;
+using unvell.ReoGrid;
+using unvell.ReoGrid.CellTypes;
+using unvell.ReoGrid.Data;
+using unvell.ReoGrid.DataFormat;
+using unvell.ReoGrid.IO;
+using unvell.ReoGrid.Events;   
 
 namespace APPPC.Functions
 {
@@ -20,6 +26,29 @@ namespace APPPC.Functions
         private DataTable allWorkorders;
         private string _tab4MachineId = null;
         private string _tab4DefaultKa = null;
+        // ===== ReoGrid (Tab3) =====
+        private ReoGridControl _tab3Grid;
+        private Worksheet _tab3Sheet;
+        private string _tab3ExcelWorkingPath;                           // temp/session file
+        private readonly string _tab3ExcelArchiveDir = @"\\dongau-nas\KHSX\DA\KHSXmayExcel"; // change if you like
+
+        // Column map: header, DataTable field, editable?
+        private readonly (string header, string field, bool editable, string? fmt)[] _tab3ColMap = new[] {
+            ("Kế hoạch?",      "Date",           true,  null),                // bool (yes/no)
+            ("LSX",            "LSX",            false, null),
+            ("Mã SP",          "product_code",   false, null),
+            ("Tên Sản Phẩm",   "product_name",   false, null),
+            ("Số lượng",       "production_qty", false, "#,##0"),
+            ("Số ĐH",          "order_name",     false, null),
+            ("Lịch Nhận Tuần", "desire",         false, "dd/MM/yyyy"),
+            ("Ngày KH",        "RawDate",        true,  "dd/MM/yyyy"),
+            ("Ca",             "ka",             true,  null),
+            ("Thứ tự",         "sequence",       true,  "0"),
+            ("Th.gian cần (h)","time_needed",    true,  "0.00"),
+            ("Giờ bắt đầu",    "start_time",     false, "dd/MM/yyyy HH:mm"),
+            ("Giờ kết thúc",   "finish_time",    false, "dd/MM/yyyy HH:mm"),
+            ("Ghi chú",        "note",           true,  null),
+        };
 
         public int modetab { get; set; }
         private readonly string[] _kaOptions = { "Bình thường", "Ca 1", "Ca 2", "Nghỉ", "Ca 1 dài", "2 Ca", "Ca 2 dài", "Ca dài", "3 Ka", "Ca dài 10h", "Ka 4H", "Ca dài 11h" };
@@ -231,6 +260,27 @@ namespace APPPC.Functions
             return null;
         }
 
+        private void EnsureTab3Grid()
+        {
+            if (_tab3Grid != null) return;
+
+            _tab3Grid = new ReoGridControl
+            {
+                Location = dataGridView2.Location,
+                Size = dataGridView2.Size,
+                Anchor = dataGridView2.Anchor,
+                Visible = false // we'll show only when Tab3 is active
+            };
+            Controls.Add(_tab3Grid);
+            _tab3Sheet = _tab3Grid.CurrentWorksheet;
+            _tab3Sheet.SetSettings(WorksheetSettings.Edit_Readonly, false);
+            _tab3Sheet.SetSettings(WorksheetSettings.View_ShowRowHeader, true);
+            _tab3Sheet.SetSettings(WorksheetSettings.View_ShowColumnHeader, true);
+            _tab3Sheet.BeforeCellEdit -= Tab3_BeforeCellEdit;   // avoid double-hook
+            _tab3Sheet.BeforeCellEdit += Tab3_BeforeCellEdit;
+
+        }
+
         private void ArrangeButtonsRight(params System.Windows.Forms.Control[] buttons)
 
         {
@@ -340,16 +390,44 @@ namespace APPPC.Functions
 
             else if (modetab == 3)
             {
-                if (string.IsNullOrEmpty(_tab3MachineId)) { MessageBox.Show("Vui lòng chọn máy trong DateSorter.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-                if (dataGridView2.DataSource is not DataTable dt3) { MessageBox.Show("Không có dữ liệu để lưu.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+                if (string.IsNullOrEmpty(_tab3MachineId))
+                {
+                    MessageBox.Show("Vui lòng chọn máy trong DateSorter.", "Thông báo",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
                 try
                 {
+                    // 1) Read from the sheet
+                    var dt3 = ReadSheetToDataTable();
+
+                    // 2) Recompute schedule with your existing logic
+                    //    (RecalculateSchedule expects columns: Date, RawDate, ka, sequence, time_needed, etc.)
+                    RecalculateSchedule(dt3);
+
+                    // 3) Persist to SQL (your existing method)
                     SQL.SavePlanUsingCheckbox(_tab3MachineId, From.Value.Date, dt3);
-                    MessageBox.Show("Đã lưu kế hoạch thành công.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                    // 4) Save Excel copy
+                    Directory.CreateDirectory(_tab3ExcelArchiveDir);
+                    string fileName = $"KH_Tab3_{_tab3MachineId}_{From.Value:yyyyMMdd}_{DateTime.Now:HHmmss}.xlsx";
+                    string path = Path.Combine(_tab3ExcelArchiveDir, fileName);
+                    _tab3Grid.Save(path, FileFormat.Excel2007);
+
+                    MessageBox.Show("Đã lưu kế hoạch & file Excel.", "Thông báo",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                    // 5) Reload from DB → re-render sheet (shows recalculated start/finish)
                     LoadTab3PlanGrid();
                 }
-                catch (Exception ex) { MessageBox.Show($"Lỗi lưu kế hoạch: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Lỗi lưu kế hoạch: {ex.Message}", "Lỗi",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
+
 
             else if (modetab == 4)
             {
@@ -461,84 +539,171 @@ namespace APPPC.Functions
             }
         }
 
+        // using System.Globalization;
+
         private void DateSorter_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (DateSorter.SelectedItem == null) return;
+            if (!(dataGridView2.DataSource is DataView dv) || dv.Table == null)
+                return;
 
-            if (modetab == 3)
+            var table = dv.Table;
+
+            // Choose a column that actually exists (prefer the one we set in Tag)
+            string filterCol = DateSorter.Tag as string;
+            if (string.IsNullOrEmpty(filterCol) || !table.Columns.Contains(filterCol))
             {
-                _tab3MachineId = DateSorter.SelectedItem.ToString();
-                LoadTab3PlanGrid();
+                foreach (var c in new[] { "desire", "date_planned_start", "date_planned_finished" })
+                    if (table.Columns.Contains(c)) { filterCol = c; break; }
+            }
+
+            // If nothing suitable, clear filter and bail
+            if (string.IsNullOrEmpty(filterCol)) { dv.RowFilter = string.Empty; return; }
+
+            // No selection ⇒ clear filter
+            if (DateSorter.SelectedIndex < 0 || DateSorter.SelectedItem == null)
+            {
+                dv.RowFilter = string.Empty;
                 return;
             }
 
-            if (dataGridView2.DataSource is not DataView dv) return;
+            // Items look like "dd/MM/yyyy (N)"; take the date part
+            var token = DateSorter.SelectedItem.ToString();
+            var datePart = token.Split(' ')[0];
 
-            string baseFilter = BuildBaseFilter();
-
-            if (modetab == 1)
+            if (!DateTime.TryParseExact(datePart, "dd/MM/yyyy",
+                CultureInfo.GetCultureInfo("vi-VN"), DateTimeStyles.None, out var d))
             {
-                string selected = DateSorter.SelectedItem.ToString();
-                string datePart = selected.Split('(')[0].Trim();
-                if (DateTime.TryParseExact(datePart, "dd/MM/yyyy", null,
-                    System.Globalization.DateTimeStyles.None, out DateTime d))
+                dv.RowFilter = string.Empty;
+                return;
+            }
+
+            var from = d.Date;
+            var to = from.AddDays(1);
+
+            // DataView RowFilter expects US-style date literals with #...#
+            dv.RowFilter = string.Format(CultureInfo.InvariantCulture,
+                "{0} >= #{1:MM/dd/yyyy}# AND {0} < #{2:MM/dd/yyyy}#",
+                filterCol, from, to);
+        }
+        private void Tab3_BeforeCellEdit(object? sender, CellBeforeEditEventArgs e)
+        {
+            // block header row
+            if (e.Cell.Row == 0) { e.IsCancelled = true; return; }
+
+            int c = e.Cell.Column;
+            bool editable = c >= 0 && c < _tab3ColMap.Length && _tab3ColMap[c].editable;
+
+            // Only allow editing on columns flagged editable in _tab3ColMap
+            e.IsCancelled = !editable;
+        }
+
+        private void RenderTab3ToSheet(DataTable dt)
+        {
+            EnsureTab3Grid();
+
+            _tab3Sheet.Reset();
+            _tab3Sheet.RowCount = Math.Max(200, dt.Rows.Count + 20);
+            _tab3Sheet.ColumnCount = Math.Max(20, _tab3ColMap.Length + 2);
+
+            // headers
+            for (int c = 0; c < _tab3ColMap.Length; c++)
+                _tab3Sheet[0, c] = _tab3ColMap[c].header;
+
+            _tab3Sheet.FreezeToCell(1, 0);
+
+            int rIndex = 1;
+            foreach (DataRow r in dt.Rows)
+            {
+                for (int c = 0; c < _tab3ColMap.Length; c++)
                 {
-                    string dayFilter = $"desire >= {HashDate(d)} AND desire < {HashDate(d.AddDays(1))}";
+                    var (hdr, field, editable, fmt) = _tab3ColMap[c];
+                    object v = r.Table.Columns.Contains(field) ? r[field] : DBNull.Value;
 
-                    dv.RowFilter = CombineFilters(baseFilter, dayFilter);
+                    // Boolean => checkbox
+                    if (field == "Date")
+                    {
+                        bool planned = r.Table.Columns.Contains("Date") && r.Field<bool?>("Date") == true;
+                        _tab3Sheet[rIndex, c] = planned;
+                        _tab3Sheet.SetCellBody(rIndex, c, new CheckBoxCell());
+                        continue;
+                    }
+
+                    // normal write
+                    _tab3Sheet[rIndex, c] = (v == DBNull.Value) ? null : v;
                 }
-                return;
+                rIndex++;
             }
 
-            string raw = DateSorter.SelectedItem.ToString();
-            string selectedCategory = raw.Split('(')[0].Trim();
 
-            currentOrderKeyForTab2 = MapToOrderMapKey(selectedCategory);
-
-            string catFilter = "";
-            if (categoryKeywords.TryGetValue(selectedCategory, out var list))
+            // simple formats that exist in 3.x
+            for (int c = 0; c < _tab3ColMap.Length; c++)
             {
-                var ors = list.Select(k => $"workorder_name LIKE '%{EscapeLike(k)}%'");
-                catFilter = "(" + string.Join(" OR ", ors) + ")";
-            }
-            else
-            {
-                catFilter = $"workorder_name LIKE '%{EscapeLike(selectedCategory)}%'";
-                currentOrderKeyForTab2 = MapToOrderMapKey(selectedCategory)
-                                         ?? InferOrderKeyFromWorkorderName(selectedCategory);
+                var (_, field, editable, fmt) = _tab3ColMap[c];
+                var range = new RangePosition(1, c, _tab3Sheet.RowCount - 1, 1);
+
+                if (field is "desire" or "RawDate" or "start_time" or "finish_time")
+                    _tab3Sheet.SetRangeDataFormat(range, CellDataFormatFlag.DateTime);
+                else if (field is "production_qty" or "sequence" or "time_needed")
+                    _tab3Sheet.SetRangeDataFormat(range, CellDataFormatFlag.Number);
             }
 
-            dv.RowFilter = CombineFilters(baseFilter, catFilter);
+            // "Ca" dropdown using cell body (no DataValidators in 3.x)
+            int kaCol = Array.FindIndex(_tab3ColMap, x => x.field == "ka");
+            if (kaCol >= 0)
+            {
+                for (int r = 1; r <= dt.Rows.Count; r++)
+                {
+                    var dd = new DropdownListCell(_kaOptions);
+                    _tab3Sheet.SetCellBody(r, kaCol, dd);
+                    // seed current value from cell text if any
+                    var current = _tab3Sheet[r, kaCol]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(current))
+                        dd.SelectedItem = current;
+                }
+            }
+
+            for (int c = 0; c < _tab3ColMap.Length; c++)
+                _tab3Sheet.AutoFitColumnWidth(c);
+
+            _tab3Grid.Visible = true;
+            dataGridView2.Visible = false;
+            _tab3Grid.Visible = true;
+            dataGridView2.Visible = false;
         }
 
         private void From_ValueChanged(object sender, EventArgs e)
         {
             if (modetab == 4) { LoadTab4PlanGrid(); return; }
             if (modetab == 3) { _tab3StartDate = From.Value.Date; LoadTab3PlanGrid(); return; }
-            if (dataGridView2.DataSource is not DataView dv) return;
+            if (dataGridView2.DataSource is not DataView dv || dv.Table is null) return;
 
             string baseFilter = BuildBaseFilter();
-            DateTime from = From.Value.Date;
-            DateTime to = To.Value.Date;
+            var t = dv.Table;
+            var dateCol = PickExistingColumn(t, "desire", "date_planned_start", "date_planned_finished");
 
-            string range = $"desire >= {HashDate(from)} AND desire < {HashDate(to.AddDays(1))}";
+            if (string.IsNullOrEmpty(dateCol)) { dv.RowFilter = baseFilter; return; }
 
+            DateTime from = From.Value.Date, to = To.Value.Date.AddDays(1);
+            string range = $"{dateCol} >= {HashDate(from)} AND {dateCol} < {HashDate(to)}";
             dv.RowFilter = CombineFilters(baseFilter, range);
         }
 
         private void To_ValueChanged(object sender, EventArgs e)
         {
             if (modetab == 4) { LoadTab4PlanGrid(); return; }
-            if (dataGridView2.DataSource is not DataView dv) return;
+            if (dataGridView2.DataSource is not DataView dv || dv.Table is null) return;
 
             string baseFilter = BuildBaseFilter();
-            DateTime from = From.Value.Date;
-            DateTime to = To.Value.Date;
+            var t = dv.Table;
+            var dateCol = PickExistingColumn(t, "desire", "date_planned_start", "date_planned_finished");
 
-            string range = $"desire >= {HashDate(from)} AND desire < {HashDate(to.AddDays(1))}";
+            if (string.IsNullOrEmpty(dateCol)) { dv.RowFilter = baseFilter; return; }
 
+            DateTime from = From.Value.Date, to = To.Value.Date.AddDays(1);
+            string range = $"{dateCol} >= {HashDate(from)} AND {dateCol} < {HashDate(to)}";
             dv.RowFilter = CombineFilters(baseFilter, range);
         }
+
 
         private void ShowEmpty_CheckedChanged(object sender, EventArgs e)
         {
@@ -556,10 +721,107 @@ namespace APPPC.Functions
         {
             int rightMargin = 5;
             int bottomMargin = 10;
+
             dataGridView2.Width = this.Width - dataGridView2.Location.X - rightMargin;
             dataGridView2.Height = this.Height - dataGridView2.Location.Y - bottomMargin;
+
             ArrangeButtonsRight(From, To, DateSorter, chkCopyToAll, button1, btnSaveYeuCau);
+
+            if (_tab3Grid != null)
+            {
+                _tab3Grid.Location = dataGridView2.Location;
+                _tab3Grid.Size = dataGridView2.Size;
+            }
         }
+
+        private static object GetCellSafe(DataRow r, string col)
+    => r.Table.Columns.Contains(col) ? r[col] : DBNull.Value;
+        private static bool ReadBool(object v)
+        {
+            if (v is bool b) return b;
+            var s = (v?.ToString() ?? "").Trim().ToLowerInvariant();
+            return s == "1" || s == "true" || s == "x" || s == "yes";
+        }
+        private static DateTime? ReadDate(object v)
+        {
+            if (v is DateTime d) return d;
+            if (DateTime.TryParse(v?.ToString(), out var t)) return t;
+            return null;
+        }
+        private static double ReadDouble(object v)
+        {
+            if (v is double d) return d;
+            if (v is float f) return f;
+            double.TryParse(v?.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var x);
+            return x;
+        }
+        private static short? ReadShort(object v)
+        {
+            if (v is short s) return s;
+            if (v is int i) return (short)i;
+            if (short.TryParse(v?.ToString(), out var t)) return t;
+            return null;
+        }
+
+        private DataTable ReadSheetToDataTable()
+        {
+            // shape similar to what SQL.SavePlanUsingCheckbox expects
+            var dt = new DataTable();
+            dt.Columns.Add("Date", typeof(bool));
+            dt.Columns.Add("LSX", typeof(string));
+            dt.Columns.Add("product_code", typeof(string));
+            dt.Columns.Add("product_name", typeof(string));
+            dt.Columns.Add("production_qty", typeof(object));
+            dt.Columns.Add("order_name", typeof(string));
+            dt.Columns.Add("desire", typeof(DateTime));
+            dt.Columns.Add("RawDate", typeof(DateTime));
+            dt.Columns.Add("ka", typeof(string));
+            dt.Columns.Add("sequence", typeof(short));
+            dt.Columns.Add("time_needed", typeof(double));
+            dt.Columns.Add("start_time", typeof(DateTime));
+            dt.Columns.Add("finish_time", typeof(DateTime));
+            dt.Columns.Add("note", typeof(string));
+
+            int rows = Math.Max(_tab3Sheet.MaxContentRow + 1, _tab3Sheet.RowCount);
+            int cols = _tab3ColMap.Length;
+
+            for (int r = 1; r < rows; r++)
+            {
+                // stop when LSX is empty
+                int lsxCol = Array.FindIndex(_tab3ColMap, x => x.field == "LSX");
+                var lsxVal = _tab3Sheet[r, lsxCol];
+                var lsx = (lsxVal?.ToString() ?? "").Trim();
+                if (string.IsNullOrEmpty(lsx)) continue;
+
+                var row = dt.NewRow();
+                for (int c = 0; c < cols; c++)
+                {
+                    var (hdr, field, editable, fmt) = _tab3ColMap[c];
+                    var v = _tab3Sheet[r, c];
+
+                    switch (field)
+                    {
+                        case "Date": row["Date"] = ReadBool(v); break;
+                        case "RawDate":
+                        case "desire":
+                        case "start_time":
+                        case "finish_time":
+                            var d = ReadDate(v); row[field] = d.HasValue ? d.Value : (object)DBNull.Value; break;
+                        case "sequence":
+                            var s = ReadShort(v); row["sequence"] = s.HasValue ? s.Value : (object)DBNull.Value; break;
+                        case "time_needed":
+                            row["time_needed"] = ReadDouble(v); break;
+                        default:
+                            row[field] = v == null || string.IsNullOrWhiteSpace(v.ToString()) ? (object)DBNull.Value : v;
+                            break;
+                    }
+                }
+                dt.Rows.Add(row);
+            }
+
+            return dt;
+        }
+
 
         private void ApplyPlannedRowStyle(DataGridViewRow row)
         {
@@ -621,23 +883,42 @@ namespace APPPC.Functions
             return 0d;
         }
 
+        private string? PickExistingColumn(DataTable table, params string[] candidates)
+        {
+            foreach (var c in candidates)
+                if (table.Columns.Contains(c)) return c;
+            return null;
+        }
+
         private string BuildBaseFilter()
         {
-            var list = new List<string>();
+            if (dataGridView2.DataSource is not DataView dv || dv.Table is null)
+                return string.Empty;
+
+            var t = dv.Table;
+            var parts = new List<string>();
+
             if (!ShowEmpty.Checked)
             {
-                list.Add("(NOT (lsx IS NULL OR lsx='') AND " +
-                         " NOT (product_code IS NULL OR product_code='') AND " +
-                         " NOT (product_name IS NULL OR product_name='') AND " +
-                         " NOT (order_name IS NULL OR order_name=''))");
-                list.Add("can_sx > 0");   // keep your empty filter
+                // only require fields that actually exist in this table
+                var nonEmptyChecks = new List<string>();
+                if (t.Columns.Contains("lsx")) nonEmptyChecks.Add("(NOT (lsx IS NULL OR lsx=''))");
+                if (t.Columns.Contains("product_code")) nonEmptyChecks.Add("(NOT (product_code IS NULL OR product_code=''))");
+                if (t.Columns.Contains("product_name")) nonEmptyChecks.Add("(NOT (product_name IS NULL OR product_name=''))");
+                if (t.Columns.Contains("order_name")) nonEmptyChecks.Add("(NOT (order_name IS NULL OR order_name=''))");
+                if (nonEmptyChecks.Count > 0) parts.Add(string.Join(" AND ", nonEmptyChecks));
+
+                if (t.Columns.Contains("can_sx")) parts.Add("can_sx > 0");
             }
 
-            // ✅ correct DateTime literal
-            list.Add($"date_planned_start >= {HashDate(DateTime.Today.AddYears(-1))}");
+            // prefer a date column that exists for the current tab
+            var dateCol = PickExistingColumn(t, "date_planned_start", "desire", "date_planned_finished");
+            if (!string.IsNullOrEmpty(dateCol))
+                parts.Add($"{dateCol} >= {HashDate(DateTime.Today.AddYears(-1))}");
 
-            return string.Join(" AND ", list);
+            return string.Join(" AND ", parts);
         }
+
 
         private DataTable BuildTab4Table(DateTime from, DateTime to)
         {
@@ -1374,6 +1655,13 @@ WHERE mp.sophieu = ANY(@lsx);";
 
                 foreach (DataGridViewRow row in dataGridView2.Rows) ApplyPlannedRowStyle(row);
 
+                // ALSO render into Excel-like UI
+                if (modetab == 3)
+                {
+                    DataTable dt3 = (DataTable)dataGridView2.DataSource;
+                    RenderTab3ToSheet(dt3);
+                }
+
                 RecomputeSequenceAndSort();
                 RecalculateSchedule(dt);
             }
@@ -1784,17 +2072,22 @@ WHERE mp.sophieu = ANY(@lsx);";
             From.Visible = true;
             To.Visible = false;
 
+            EnsureTab3Grid();
+            _tab3Grid.Visible = true;
+            dataGridView2.Visible = false;
+
             DateSorter.Visible = true;
             DateSorter.Items.Clear();
             foreach (var m in SQL.LoadMachineListForPlan()) DateSorter.Items.Add(m);
             if (DateSorter.Items.Count > 0)
             {
-                DateSorter.SelectedIndex = 0;                   // machine pick
+                DateSorter.SelectedIndex = 0;
                 _tab3MachineId = DateSorter.SelectedItem.ToString();
             }
 
             _tab3StartDate = From.Value.Date;
 
+            // original event hooks stay
             dataGridView2.CurrentCellDirtyStateChanged -= dataGridView2_CurrentCellDirtyStateChanged;
             dataGridView2.CurrentCellDirtyStateChanged += dataGridView2_CurrentCellDirtyStateChanged;
             dataGridView2.CellValueChanged -= dataGridView2_CellValueChanged;
@@ -1802,9 +2095,10 @@ WHERE mp.sophieu = ANY(@lsx);";
             dataGridView2.DataBindingComplete -= dataGridView2_DataBindingComplete;
             dataGridView2.DataBindingComplete += dataGridView2_DataBindingComplete;
 
-            LoadTab3PlanGrid();
+            LoadTab3PlanGrid();     // ← builds DataTable and calls RenderTab3ToSheet(dt)
             RefreshSearcherItems();
         }
+
 
         private void tab4_Click(object sender, EventArgs e)
         {
