@@ -1,24 +1,28 @@
 ﻿using APPPC.Control;
 using APPPC.KHSX_Helpers;
+using ClosedXML.Excel;
 using Microsoft.Data.SqlClient;
 using Npgsql;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Drawing;
 using System.Globalization;
+using System.Linq;
 using System.Text;
+using System.Windows.Forms;
 using unvell.ReoGrid;
 using unvell.ReoGrid.CellTypes;
 using unvell.ReoGrid.Data;
 using unvell.ReoGrid.DataFormat;
+using unvell.ReoGrid.Events;
 using unvell.ReoGrid.IO;
-using unvell.ReoGrid.Events;   
 
 namespace APPPC.Functions
 {
     public partial class KHSX_panel : UserControl
     {
-
         private string _tab3MachineId = null;
         private DateTime _tab3StartDate;
         private ComboBox? _tab4KaEditingCombo;
@@ -26,15 +30,36 @@ namespace APPPC.Functions
         private DataTable allWorkorders;
         private string _tab4MachineId = null;
         private string _tab4DefaultKa = null;
+
         // ===== ReoGrid (Tab3) =====
         private ReoGridControl _tab3Grid;
         private Worksheet _tab3Sheet;
-        private string _tab3ExcelWorkingPath;                           // temp/session file
-        private readonly string _tab3ExcelArchiveDir = @"\\dongau-nas\KHSX\DA\KHSXmayExcel"; // change if you like
+        private string _tab3ExcelWorkingPath;
+        private readonly string _tab3ExcelArchiveDir = @"\\dongau-nas\KHSX\DA\KHSXmayExcel";
+        private PartialGrid? _cutRowsBuffer;
+        private int _cutRowsCount;
+        private bool _hasCutRows;
 
-        // Column map: header, DataTable field, editable?
+        private readonly Color _tabGreen = Color.FromArgb(0x18, 0x9F, 0x40);
+        private readonly Color _tabGreenActive;
+        private List<Button> _tabButtons;
+
+        private Button _btnFillMachineShown;          // Tab2 autofill button
+        private Button _btnImportExcel;               // Import Excel button
+
+        // chips UI + state
+        private FlowLayoutPanel _filterBar;
+        private sealed class Chip
+        {
+            public string Display { get; init; } = "";
+            public string Column { get; init; } = "";
+            public string Value { get; init; } = "";
+            public Button Button { get; init; }
+        }
+        private readonly List<Chip> _chips = new();
+
+        // Column map (Tab3)
         private readonly (string header, string field, bool editable, string? fmt)[] _tab3ColMap = new[] {
-            ("Kế hoạch?",      "Date",           true,  null),                // bool (yes/no)
             ("LSX",            "LSX",            false, null),
             ("Mã SP",          "product_code",   false, null),
             ("Tên Sản Phẩm",   "product_name",   false, null),
@@ -53,117 +78,311 @@ namespace APPPC.Functions
         public int modetab { get; set; }
         private readonly string[] _kaOptions = { "Bình thường", "Ca 1", "Ca 2", "Nghỉ", "Ca 1 dài", "2 Ca", "Ca 2 dài", "Ca dài", "3 Ka", "Ca dài 10h", "Ka 4H", "Ca dài 11h" };
         private bool _tab4ApplyingKa = false;
+        private const string DefaultShiftName = "Bình thường";
+        private readonly Dictionary<string, string> _searchMap = new(StringComparer.OrdinalIgnoreCase);
+
         private static string EscapeLike(string s) => s?.Replace("'", "''") ?? "";
         private static string CombineFilters(params string[] parts) => string.Join(" AND ", parts.Where(s => !string.IsNullOrWhiteSpace(s)));
         private string? currentOrderKeyForTab2 = null;
         private static string HashDate(DateTime d) => $"#{d.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture)}#";
-        private readonly Dictionary<string, (TimeSpan start, TimeSpan? end)> _shifts = new()
-        {
-            ["Bình thường"] = (TimeSpan.Parse("07:30"), TimeSpan.Parse("15:30")),
-            ["Ca 1"] = (TimeSpan.Parse("06:00"), TimeSpan.Parse("13:30")),
-            ["Ca 2"] = (TimeSpan.Parse("14:00"), TimeSpan.Parse("21:30")),
-            ["Nghỉ"] = (TimeSpan.Parse("00:00"), TimeSpan.Parse("00:00")),
-            ["Ca 1 dài"] = (TimeSpan.Parse("06:00"), TimeSpan.Parse("17:00")),
-            ["2 Ca"] = (TimeSpan.Parse("06:00"), TimeSpan.Parse("21:00")),
-            ["Ca 2 dài"] = (TimeSpan.Parse("18:00"), TimeSpan.Parse("05:00")),
-            ["Ca dài"] = (TimeSpan.Parse("00:01"), TimeSpan.Parse("23:59")),
-            ["3 Ka"] = (TimeSpan.Parse("00:01"), TimeSpan.Parse("23:59")),
-            ["Ca dài 10h"] = (TimeSpan.Parse("06:00"), TimeSpan.Parse("16:00")),
-            ["Ka 4H"] = (TimeSpan.Parse("08:00"), TimeSpan.Parse("12:00")),
-            ["Ca dài 11h"] = (TimeSpan.Parse("06:00"), TimeSpan.Parse("17:00")),
-        };
-        private readonly Dictionary<string, List<string>> categoryKeywords = new Dictionary<string, List<string>>
-        {
-            { "In", new List<string> { "In", "Flexo", "Offset", "Máy In" } },
-            { "Bế", new List<string> { "Bế", "Cắt", "Diecut" } },
-            { "Dán", new List<string> { "Dán", "Dập ghim", "Dán keo" } },
-            { "Tráng", new List<string> { "Tráng", "Phủ" } },
-            { "Gỡ", new List<string> { "Gỡ", "Tháo", "Tách" } }
-        };
 
-        private static string NormalizeLsxKey(object value)
+        // ===== Excel helpers for import =====
+        private static string NormKey(string? s) =>
+            (s ?? string.Empty).Trim().Replace(" ", "").Replace("\u200B", "");
+
+        private static string Canon(string s)
         {
-            return (value?.ToString() ?? "")
-                .Trim()
-                .Replace(" ", "")
-                .Replace("\u200B", "");
+            var formD = s.Normalize(NormalizationForm.FormD);
+            var sb = new StringBuilder(formD.Length);
+            foreach (var ch in formD)
+            {
+                var cat = CharUnicodeInfo.GetUnicodeCategory(ch);
+                if (cat == UnicodeCategory.NonSpacingMark) continue;
+                sb.Append(char.ToLowerInvariant(ch));
+            }
+            return sb.ToString().Normalize(NormalizationForm.FormC);
         }
 
-        private const string DefaultShiftName = "Bình thường";
-
-        private readonly Dictionary<string, string> _searchMap = new(StringComparer.OrdinalIgnoreCase);
-
-        private (DateTime? start, DateTime? end) ComputeKaWindow(DateTime day, string? ka)
+        private static int FindHeaderColumn(IXLWorksheet ws, params string[] names)
         {
-            if (string.IsNullOrWhiteSpace(ka)) return (null, null);
-            var key = NormalizeKaKey(ka);
-            if (key == "Nghỉ") return (null, null);      // day off = no times
+            var header = ws.FirstRowUsed();
+            if (header == null) return -1;
+            var targets = names.Select(Canon).ToArray();
 
-            var shift = _shifts[key];
-            var start = day.Date + shift.start;
-            DateTime end = shift.end.HasValue ? day.Date + shift.end.Value : start.AddHours(24);
-            if (shift.end.HasValue && shift.end.Value <= shift.start) end = end.AddDays(1);
-            return (start, end);
+            foreach (var cell in header.CellsUsed())
+            {
+                var h = Canon(cell.GetString().Trim());
+                if (targets.Any(t => h.Contains(t)))
+                    return cell.Address.ColumnNumber;
+            }
+            return -1;
         }
 
-        private void RecalcRowTimes(DataRow r)
+        private static DateTime? ParseCellDate(IXLCell cell)
         {
-            if (r == null) return;
-            var d = r.Field<DateTime>("DateOnly");
-            var ka = r.Field<string?>("ka");
-            var (st, en) = ComputeKaWindow(d, ka);
-            r["start_time"] = (object?)st ?? DBNull.Value;
-            r["end_time"] = (object?)en ?? DBNull.Value;
+            if (cell == null) return null;
+
+            if (cell.DataType == XLDataType.DateTime)
+                return cell.GetDateTime().Date;
+
+            if (cell.TryGetValue<double>(out var oa))
+            {
+                try { return DateTime.FromOADate(oa).Date; } catch { }
+            }
+
+            var s = cell.GetString().Trim();
+            if (string.IsNullOrEmpty(s)) return null;
+
+            string[] fmts = {
+                "dd/MM/yyyy","d/M/yyyy","dd-MM-yyyy","d-M-yyyy",
+                "yyyy-MM-dd","M/d/yyyy","MM/dd/yyyy"
+            };
+            if (DateTime.TryParseExact(s, fmts,
+                CultureInfo.GetCultureInfo("vi-VN"),
+                DateTimeStyles.None, out var dt))
+                return dt.Date;
+
+            if (DateTime.TryParse(s, out var auto))
+                return auto.Date;
+
+            return null;
         }
 
-        private void UpdateStartFinishForRow(DataRow r)
+        private sealed class ExcelTriple
         {
-            bool planned = r.Table.Columns.Contains("Date") && r.Field<bool?>("Date") == true;
-            if (!planned) { r["start_time"] = DBNull.Value; r["finish_time"] = DBNull.Value; return; }
-
-            // base date is RawDate (already >= _tab3StartDate)
-            var baseDate = r.Table.Columns.Contains("RawDate") && r["RawDate"] != DBNull.Value
-                ? ((DateTime)r["RawDate"]).Date
-                : _tab3StartDate;
-
-            var ka = (r.Table.Columns.Contains("ka") ? r["ka"] : r.Table.Columns.Contains("ka_combo") ? r["ka_combo"] : null)?.ToString() ?? "";
-            if (!_shifts.TryGetValue(ka, out var sh)) sh = (TimeSpan.Zero, null);
-
-            var start = baseDate + sh.start;
-            r["start_time"] = start;
-
-            double hours = 0;
-            if (r.Table.Columns.Contains("time_needed") && r["time_needed"] != DBNull.Value)
-                double.TryParse(r["time_needed"].ToString(), out hours);
-
-            r["finish_time"] = start.AddHours(hours);
+            public DateTime? LichTuan { get; set; }    // → desire
+            public DateTime? NgayYC { get; set; }      // → checker
+            public DateTime? DieuChinh { get; set; }   // → extra
         }
 
+        private static Dictionary<string, ExcelTriple> ReadNgayYcDieuChinh_AllSheets(string filePath)
+        {
+            var map = new Dictionary<string, ExcelTriple>(StringComparer.OrdinalIgnoreCase);
+            using var wb = new XLWorkbook(filePath);
+
+            foreach (var ws in wb.Worksheets)
+            {
+                int colLsx = FindHeaderColumn(ws, "lsx", "lenh sx", "so phieu", "sophieu", "lệnh sx", "Lệnh SX");
+                if (colLsx < 1) continue;
+
+                int colLichTuan = FindHeaderColumn(ws, "lịch tuần", "lich tuan", "lich tuan (du kien)", "Ngày Nhận", "ngay nhan", "Ngay Nhan", "ngày nhận");
+                int colYC = FindHeaderColumn(ws, "ngày y/c", "ngay y/c", "ngay yc", "y/c", "yc");
+                int colDC = FindHeaderColumn(ws, "điều chỉnh", "dieu chinh", "điều-chỉnh");
+
+                if (colLichTuan < 1 && colYC < 1 && colDC < 1) continue;
+
+                var headerRow = ws.FirstRowUsed().RowNumber();
+                foreach (var row in ws.RowsUsed().Where(r => r.RowNumber() > headerRow))
+                {
+                    var key = NormKey(row.Cell(colLsx).GetString());
+                    if (string.IsNullOrEmpty(key)) continue;
+
+                    var triple = map.ContainsKey(key) ? map[key] : new ExcelTriple();
+
+                    if (colLichTuan > 0) triple.LichTuan = ParseCellDate(row.Cell(colLichTuan)) ?? triple.LichTuan;
+                    if (colYC > 0) triple.NgayYC = ParseCellDate(row.Cell(colYC)) ?? triple.NgayYC;
+                    if (colDC > 0) triple.DieuChinh = ParseCellDate(row.Cell(colDC)) ?? triple.DieuChinh;
+
+                    map[key] = triple;
+                }
+            }
+            return map;
+        }
+
+        // ===== Date parsing + coloring =====
+        private static bool TryGetCellDate(object value, out DateOnly d)
+        {
+            d = default;
+            if (value == null) return false;
+
+            if (value is DateTime dt)
+            {
+                d = DateOnly.FromDateTime(dt.Date);
+                return true;
+            }
+
+            var s = value.ToString()?.Trim();
+            if (string.IsNullOrEmpty(s)) return false;
+
+            string[] fmts = { "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "d-M-yyyy", "yyyy-MM-dd", "M/d/yyyy", "MM/dd/yyyy" };
+            if (DateTime.TryParseExact(s, fmts, CultureInfo.GetCultureInfo("vi-VN"),
+                                       DateTimeStyles.None, out var parsed) ||
+                DateTime.TryParse(s, out parsed))
+            {
+                d = DateOnly.FromDateTime(parsed.Date);
+                return true;
+            }
+            return false;
+        }
+
+        private void ApplyDateStatusColorsForRow(DataGridViewRow row)
+        {
+            if (row?.DataGridView == null || row.IsNewRow) return;
+
+            var desireCell = row.Cells["desire"];
+            var checkerCell = row.Cells["checker"];
+            var extraCell = row.Cells["extra"];
+
+            // reset to default
+            desireCell.Style.BackColor = SystemColors.Window;
+            checkerCell.Style.BackColor = SystemColors.Window;
+            extraCell.Style.BackColor = SystemColors.Window;
+
+            var today = DateOnly.FromDateTime(DateTime.Today);
+
+            // any value in "extra" -> green
+            if (extraCell?.Value != null && !string.IsNullOrWhiteSpace(extraCell.Value.ToString()))
+                extraCell.Style.BackColor = Color.LightGreen;
+
+            bool hasDesire = TryGetCellDate(desireCell?.Value, out var dDesire);
+            bool hasChecker = TryGetCellDate(checkerCell?.Value, out var dChecker);
+
+            // flag PAST dates only (before today)
+            if (hasDesire && dDesire < today) desireCell.Style.BackColor = Color.LightCoral;
+            if (hasChecker && dChecker < today) checkerCell.Style.BackColor = Color.LightCoral;
+
+            // checker later than desire -> checker red
+            if (hasDesire && hasChecker && dChecker > dDesire)
+                checkerCell.Style.BackColor = Color.LightCoral;
+        }
+
+        private void ApplyDateStatusColors()
+        {
+            if (dataGridView2 == null) return;
+            foreach (DataGridViewRow r in dataGridView2.Rows)
+                ApplyDateStatusColorsForRow(r);
+            dataGridView2.Invalidate();
+        }
+
+        // ===== Excel import =====
+        private void ImportYeuCauFromExcel_Click(object? sender, EventArgs e)
+        {
+            using var ofd = new OpenFileDialog
+            {
+                Title = "Chọn file Excel (chứa LSX + Lịch tuần/Ngày Y/C/Điều chỉnh)",
+                Filter = "Excel files (*.xlsx;*.xls)|*.xlsx;*.xls|All files (*.*)|*.*",
+                Multiselect = false
+            };
+            if (ofd.ShowDialog() != DialogResult.OK) return;
+
+            Dictionary<string, ExcelTriple> dict;
+            try { dict = ReadNgayYcDieuChinh_AllSheets(ofd.FileName); }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Không đọc được Excel: {ex.Message}", "Lỗi",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (dict.Count == 0)
+            {
+                MessageBox.Show("Không tìm thấy dữ liệu hợp lệ (cần có LSX và ít nhất một trong ba: Lịch tuần / Ngày Y/C / Điều chỉnh).",
+                    "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (dataGridView2.Columns["lsx"] == null)
+            {
+                MessageBox.Show("Bảng hiện tại không có cột LSX.", "Lỗi",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Ensure target columns exist
+            if (dataGridView2.Columns["desire"] == null)
+                dataGridView2.Columns.Add(new DataGridViewTextBoxColumn { Name = "desire", HeaderText = "Lịch Nhận Tuần" });
+            if (dataGridView2.Columns["checker"] == null)
+                dataGridView2.Columns.Add(new DataGridViewTextBoxColumn { Name = "checker", HeaderText = "Ngày SX Phản Hồi" });
+            if (dataGridView2.Columns["extra"] == null)
+                dataGridView2.Columns.Add(new DataGridViewTextBoxColumn { Name = "extra", HeaderText = "Ngày Giao Hàng" });
+
+            // Ask the GRID which columns are editable for THIS user
+            bool canDesire = WorkorderService.ColumnIsEditable(dataGridView2, "desire");
+            bool canChecker = WorkorderService.ColumnIsEditable(dataGridView2, "checker");
+            bool canExtra = WorkorderService.ColumnIsEditable(dataGridView2, "extra");
+
+            int updated = 0, notFound = 0, skippedByPerm = 0;
+            dataGridView2.SuspendLayout();
+            try
+            {
+                foreach (DataGridViewRow r in dataGridView2.Rows)
+                {
+                    if (r.IsNewRow) continue;
+                    var k = NormKey(r.Cells["lsx"]?.Value?.ToString());
+                    if (string.IsNullOrEmpty(k)) { notFound++; continue; }
+                    if (!dict.TryGetValue(k, out var triple)) { notFound++; continue; }
+
+                    bool wrote = false;
+
+                    if (triple.LichTuan.HasValue)
+                    {
+                        if (canDesire) { r.Cells["desire"].Value = triple.LichTuan.Value; wrote = true; }
+                        else skippedByPerm++;
+                    }
+                    if (triple.NgayYC.HasValue)
+                    {
+                        if (canChecker) { r.Cells["checker"].Value = triple.NgayYC.Value; wrote = true; }
+                        else skippedByPerm++;
+                    }
+                    if (triple.DieuChinh.HasValue)
+                    {
+                        if (canExtra) { r.Cells["extra"].Value = triple.DieuChinh.Value; wrote = true; }
+                        else skippedByPerm++;
+                    }
+
+                    if (wrote) updated++;
+                }
+            }
+            finally { dataGridView2.ResumeLayout(); }
+
+            ApplyDateStatusColors();
+            MessageBox.Show(
+                $"Đã cập nhật {updated} dòng theo LSX.\n" +
+                $"Không khớp: {notFound}.\n" +
+                (skippedByPerm > 0 ? $"Bỏ qua do quyền hạn: {skippedByPerm}." : ""),
+                "Nhập Excel", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+
+        // ===== Init & layout =====
         public KHSX_panel()
         {
             InitializeComponent();
-            KHSX_panel_SizeChanged(null, null);
+            _tabGreenActive = ControlPaint.Light(_tabGreen, 0.45f);
+            _tabButtons = new List<Button> { tab1 };
+
+
+            foreach (var b in _tabButtons)
+            {
+                if (b == null) continue;
+                b.FlatStyle = FlatStyle.Flat;
+                b.FlatAppearance.BorderSize = 0;
+                b.UseVisualStyleBackColor = false;
+                b.BackColor = _tabGreen;
+                b.ForeColor = Color.White;
+            }
+
             this.Dock = DockStyle.Fill;
 
-            From.Format = DateTimePickerFormat.Custom;
-            From.CustomFormat = "dd/MM/yyyy";
-            To.Format = DateTimePickerFormat.Custom;
-            To.CustomFormat = "dd/MM/yyyy";
+            From.Format = DateTimePickerFormat.Custom; From.CustomFormat = "dd/MM/yyyy";
+            To.Format = DateTimePickerFormat.Custom; To.CustomFormat = "dd/MM/yyyy";
 
-            // Default_Ka combobox: fixed list, user must choose from it
             Default_Ka.DropDownStyle = ComboBoxStyle.DropDownList;
             Default_Ka.Items.Clear();
             Default_Ka.Items.AddRange(_kaOptions);
+
             button1.Visible = true;
             Default_Ka.Visible = false;
             chkCopyToAll.Visible = true;
             ShowEmpty.Text = "Hiển thị LSX trống";
+
             modetab = 1;
             allWorkorders = WorkorderService.LoadPendingWorkorders(
                 dataGridView1, dataGridView2, ShowEmpty, ShowOld, DateSorter, modetab);
-            // after dataGridView2.DataSource = _tab4Table; and column setup
-            dataGridView2.AllowUserToAddRows = false;   // ⛔ no blank last row
+
+            dataGridView2.AllowUserToAddRows = false;
             dataGridView2.AllowUserToDeleteRows = false;
+
 
             typeof(DataGridView).InvokeMember(
                 "DoubleBuffered",
@@ -171,7 +390,213 @@ namespace APPPC.Functions
                 System.Reflection.BindingFlags.Instance |
                 System.Reflection.BindingFlags.SetProperty,
                 null, dataGridView2, new object[] { true });
+
             RefreshSearcherItems();
+
+            _filterBar = new FlowLayoutPanel
+            {
+                Name = "filterBar",
+                AutoSize = true,
+                WrapContents = true,
+                Location = new Point(textBox1.Left, textBox1.Bottom + 4),
+                Width = Math.Max(200, dataGridView2.Width / 2),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            Controls.Add(_filterBar);
+
+            DateSorter.DropDownStyle = ComboBoxStyle.DropDownList;
+            _filterBar.Dock = DockStyle.Top;
+            _filterBar.BringToFront();
+
+            // Create Import Excel button (above Copy button)
+            _btnImportExcel = new Button
+            {
+                Name = "btnImportExcel",
+                Text = "Nhập Excel",
+                AutoSize = true
+            };
+            _btnImportExcel.Click += ImportYeuCauFromExcel_Click;
+            Controls.Add(_btnImportExcel);
+
+            // hook coloring events
+            dataGridView2.CellEndEdit += DataGridView2_CellEndEdit;
+            dataGridView2.CurrentCellDirtyStateChanged += DataGridView2_CurrentCellDirtyStateChanged;
+            dataGridView2.DataBindingComplete += DataGridView2_DataBindingComplete;
+
+            // Initial layout
+            KHSX_panel_SizeChanged(null, null);
+
+            // chips: press Enter to add
+            textBox1.KeyDown += textBox1_KeyDown_AddChipOnEnter;
+        }
+
+        private void LayoutGridsUnderHeader()
+        {
+            int headerBottom = new[] {
+                textBox1?.Bottom ?? 0,
+                searcher?.Bottom ?? 0,
+                ShowEmpty?.Bottom ?? 0,
+                ShowOld?.Bottom ?? 0,
+                From.Visible ? From.Bottom : 0,
+                To.Visible ? To.Bottom : 0,
+                DateSorter.Visible ? DateSorter.Bottom : 0,
+                Default_Ka.Visible ? Default_Ka.Bottom : 0,
+                _btnImportExcel?.Bottom ?? 0,
+                chkCopyToAll.Visible ? chkCopyToAll.Bottom : 0,
+                button1.Visible ? button1.Bottom : 0,
+                btnSaveYeuCau?.Bottom ?? 0,
+                _filterBar?.Bottom ?? 0
+            }.Max() + 8;
+
+            int rightMargin = 5, bottomMargin = 10;
+            int left = dataGridView2.Left;
+
+            dataGridView2.Top = headerBottom;
+            dataGridView2.Left = left;
+            dataGridView2.Width = this.Width - left - rightMargin;
+            dataGridView2.Height = this.Height - dataGridView2.Top - bottomMargin;
+            dataGridView2.SendToBack();
+
+            if (_tab3Grid != null)
+            {
+                _tab3Grid.Top = dataGridView2.Top;
+                _tab3Grid.Left = dataGridView2.Left;
+                _tab3Grid.Width = dataGridView2.Width;
+                _tab3Grid.Height = dataGridView2.Height;
+                _tab3Grid.SendToBack();
+            }
+        }
+
+        private void KHSX_panel_SizeChanged(object sender, EventArgs e)
+        {
+            ArrangeButtonsRight(From, To, DateSorter, _btnFillMachineShown, chkCopyToAll, button1, btnSaveYeuCau);
+
+            // Place Import Excel directly above Copy button
+            if (_btnImportExcel != null && chkCopyToAll != null && !_btnImportExcel.IsDisposed)
+            {
+                _btnImportExcel.Left = chkCopyToAll.Left;
+                _btnImportExcel.Top = Math.Max(0, chkCopyToAll.Top - _btnImportExcel.Height - 4);
+            }
+
+            LayoutGridsUnderHeader();
+        }
+
+        private void ArrangeButtonsRight(params System.Windows.Forms.Control[] buttons)
+        {
+            if (buttons == null || buttons.Length == 0) return;
+            var list = buttons.Where(b => b != null && !b.IsDisposed).ToList();
+            if (list.Count == 0) return;
+
+            int rightMargin = 10;
+            int spacing = 5;
+            int x = this.ClientSize.Width - rightMargin;
+
+            var refCtrl = list.FirstOrDefault(c => c.Visible) ?? list[0];
+            int y = refCtrl.Top;
+
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                var btn = list[i];
+                if (btn == null || btn.IsDisposed) continue;
+
+                x -= btn.Width;
+                btn.Location = new Point(x, y);
+                x -= spacing;
+            }
+        }
+
+        // ===== Chips & filtering =====
+        private void textBox1_KeyDown_AddChipOnEnter(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            e.Handled = true; e.SuppressKeyPress = true;
+            AddFilterChipFromInputs();
+        }
+
+        private void AddFilterChipFromInputs()
+        {
+            var term = textBox1.Text.Trim();
+            if (string.IsNullOrEmpty(term)) return;
+
+            var display = searcher.SelectedItem?.ToString() ?? "";
+            if (!_searchMap.TryGetValue(display, out var col) || string.IsNullOrWhiteSpace(col)) return;
+
+            var btn = new Button
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlatStyle = FlatStyle.Standard,
+                Text = $"[{display}]: {term}",
+                Margin = new Padding(3)
+            };
+
+            var chip = new Chip { Display = display, Column = col, Value = term, Button = btn };
+            btn.Tag = chip;
+            btn.Click += (s, _) => { RemoveChip((Button)s); };
+
+            _chips.Add(chip);
+            _filterBar.Controls.Add(btn);
+
+            textBox1.Clear();
+            ApplyAllFilters();
+        }
+
+        private void RemoveChip(Button chipButton)
+        {
+            if (chipButton?.Tag is Chip chip)
+            {
+                _chips.Remove(chip);
+                _filterBar.Controls.Remove(chipButton);
+                chipButton.Dispose();
+                ApplyAllFilters();
+            }
+        }
+
+        private static string QuoteForRowFilter(string s) =>
+            s?.Replace("'", "''").Replace("[", "[[]").Replace("]", "[]]") ?? string.Empty;
+
+        private void FilterTab2ByMachine(string selected)
+        {
+            if (dataGridView2.DataSource is not DataView dv || dv.Table == null) return;
+            if (!dv.Table.Columns.Contains("machine")) { ApplyAllFilters(); return; }
+
+            string extra;
+            if (string.Equals(selected, "Chung", StringComparison.OrdinalIgnoreCase))
+                extra = "([machine] IS NULL OR [machine] = '')";
+            else
+                extra = $"[machine] = '{QuoteForRowFilter(selected.Trim())}'";
+
+            ApplyAllFilters(extra);
+        }
+
+        private string BuildChipsFilterExpression(DataView dv)
+        {
+            if (_chips.Count == 0) return string.Empty;
+            var parts = new List<string>();
+            foreach (var ch in _chips)
+            {
+                if (dv.Table?.Columns.Contains(ch.Column) != true) continue;
+                parts.Add($"CONVERT([{ch.Column}], 'System.String') LIKE '%{EscapeLike(ch.Value)}%'");
+            }
+            return string.Join(" AND ", parts);
+        }
+
+        private void ApplyAllFilters(string extra = "")
+        {
+            if (dataGridView2.DataSource is not DataView dv) return;
+
+            string baseFilter = BuildBaseFilter();
+            string chips = BuildChipsFilterExpression(dv);
+            var expr = CombineFilters(baseFilter, chips, extra);
+
+            try { dv.RowFilter = expr; }
+            catch (System.Data.SyntaxErrorException)
+            {
+                try { dv.RowFilter = CombineFilters(baseFilter, chips); }
+                catch { dv.RowFilter = string.Empty; }
+                System.Diagnostics.Debug.WriteLine("RowFilter syntax error. Full expr:");
+                System.Diagnostics.Debug.WriteLine(expr);
+            }
         }
 
         private void RefreshSearcherItems()
@@ -184,12 +609,9 @@ namespace APPPC.Functions
                 searcher.Items.Clear();
                 _searchMap.Clear();
 
-                // Use DisplayIndex so the list order matches the grid visually
-                foreach (DataGridViewColumn c in dataGridView2.Columns
-                             .Cast<DataGridViewColumn>()
-                             .OrderBy(col => col.DisplayIndex))
+                foreach (DataGridViewColumn c in dataGridView2.Columns.Cast<DataGridViewColumn>().OrderBy(col => col.DisplayIndex))
                 {
-                    if (!c.Visible) continue;                 // only show visible columns
+                    if (!c.Visible) continue;
                     var display = string.IsNullOrWhiteSpace(c.HeaderText) ? c.Name : c.HeaderText;
                     var dataProp = string.IsNullOrWhiteSpace(c.DataPropertyName) ? c.Name : c.DataPropertyName;
 
@@ -200,7 +622,6 @@ namespace APPPC.Functions
                     }
                 }
 
-                // Pick a sensible default if possible
                 var preferred = new[] { "LSX", "Số ĐH", "Tên sản phẩm", "Mã SP" };
                 foreach (var p in preferred)
                 {
@@ -212,287 +633,140 @@ namespace APPPC.Functions
             finally { searcher.EndUpdate(); }
         }
 
-        private string? MapToOrderMapKey(string label)
+        private string? PickExistingColumn(DataTable table, params string[] candidates)
         {
-            if (string.IsNullOrWhiteSpace(label)) return null;
-
-            // Normalize
-            label = label.Trim();
-
-            // OrderMap keys you defined: "Bế","Dán","Tráng Màng","In"
-            // Our DateSorter categories use e.g. "Tráng" (not "Tráng Màng")
-            if (label.Equals("Tráng", StringComparison.OrdinalIgnoreCase) ||
-                label.Equals("Tráng Màng", StringComparison.OrdinalIgnoreCase) ||
-                label.IndexOf("Tráng", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Phủ", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "Tráng Màng";
-
-            if (label.IndexOf("Bế", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Cắt", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Diecut", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "Bế";
-
-            if (label.IndexOf("Dán", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Dập ghim", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("keo", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "Dán";
-
-            if (label.IndexOf("In", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Flexo", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Offset", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                label.IndexOf("Máy In", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "In";
-
+            foreach (var c in candidates)
+                if (table.Columns.Contains(c)) return c;
             return null;
         }
 
-        private string? InferOrderKeyFromWorkorderName(string? workorderName)
+        private string BuildBaseFilter()
         {
-            if (string.IsNullOrWhiteSpace(workorderName)) return null;
+            if (dataGridView2.DataSource is not DataView dv || dv.Table is null)
+                return string.Empty;
 
-            foreach (var kv in categoryKeywords)
+            var t = dv.Table;
+            var parts = new List<string>();
+
+            if (!ShowEmpty.Checked)
             {
-                if (kv.Value.Any(k => workorderName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0))
-                {
-                    return MapToOrderMapKey(kv.Key);
-                }
-            }
-            return null;
-        }
+                var nonEmpty = new List<string>();
+                if (t.Columns.Contains("lsx")) nonEmpty.Add("(NOT (lsx IS NULL OR lsx=''))");
+                if (t.Columns.Contains("product_code")) nonEmpty.Add("(NOT (product_code IS NULL OR product_code=''))");
+                if (t.Columns.Contains("product_name")) nonEmpty.Add("(NOT (product_name IS NULL OR product_name=''))");
+                if (t.Columns.Contains("order_name")) nonEmpty.Add("(NOT (order_name IS NULL OR order_name=''))");
+                if (nonEmpty.Count > 0) parts.Add(string.Join(" AND ", nonEmpty));
 
-        private void EnsureTab3Grid()
-        {
-            if (_tab3Grid != null) return;
-
-            _tab3Grid = new ReoGridControl
-            {
-                Location = dataGridView2.Location,
-                Size = dataGridView2.Size,
-                Anchor = dataGridView2.Anchor,
-                Visible = false // we'll show only when Tab3 is active
-            };
-            Controls.Add(_tab3Grid);
-            _tab3Sheet = _tab3Grid.CurrentWorksheet;
-            _tab3Sheet.SetSettings(WorksheetSettings.Edit_Readonly, false);
-            _tab3Sheet.SetSettings(WorksheetSettings.View_ShowRowHeader, true);
-            _tab3Sheet.SetSettings(WorksheetSettings.View_ShowColumnHeader, true);
-            _tab3Sheet.BeforeCellEdit -= Tab3_BeforeCellEdit;   // avoid double-hook
-            _tab3Sheet.BeforeCellEdit += Tab3_BeforeCellEdit;
-
-        }
-
-        private void ArrangeButtonsRight(params System.Windows.Forms.Control[] buttons)
-
-        {
-            int rightMargin = 10;
-            int spacing = 5;
-            int x = this.Width - rightMargin;
-            int y = buttons[0].Top;
-
-            for (int i = buttons.Length - 1; i >= 0; i--)
-            {
-                var btn = buttons[i];
-                x -= btn.Width;
-                btn.Location = new Point(x, y);
-                x -= spacing;
-            }
-        }
-
-        private void button1_Click(object sender, EventArgs e)
-        {
-            if (dataGridView2.CurrentRow != null && modetab == 3)
-            {
-                var lsx = dataGridView2.CurrentRow.Cells["lsx"].Value?.ToString();
-                if (!string.IsNullOrEmpty(lsx))
-                    WorkorderService.ProductionPlan(lsx, dataGridView2);
-            }
-        }
-
-        private void textBox1_TextChanged(object sender, EventArgs e)
-        {
-            if (dataGridView2.DataSource is not DataView dv) return;
-
-            string baseFilter = BuildBaseFilter();
-            string f = textBox1.Text.Trim();
-
-            string textFilter = string.Empty;
-
-            if (!string.IsNullOrEmpty(f))
-            {
-                if (searcher.SelectedItem != null &&
-                    _searchMap.TryGetValue(searcher.SelectedItem.ToString(), out var col))
-                {
-                    // Convert to string so this works for text, numbers, and dates
-                    textFilter = $"CONVERT([{col}], 'System.String') LIKE '%{EscapeLike(f)}%'";
-                }
-                else
-                {
-                    // Fallback (old behavior)
-                    textFilter = $"(order_name LIKE '%{EscapeLike(f)}%' OR lsx LIKE '%{EscapeLike(f)}%')";
-                }
+                if (t.Columns.Contains("can_sx")) parts.Add("can_sx > 0");
             }
 
-            dv.RowFilter = CombineFilters(baseFilter, textFilter);
+            var dateCol = PickExistingColumn(t, "date_planned_start", "desire", "date_planned_finished");
+            if (!string.IsNullOrEmpty(dateCol))
+                parts.Add($"{dateCol} >= {HashDate(DateTime.Today.AddYears(-1))}");
+
+            return string.Join(" AND ", parts);
         }
 
+        // ===== Date coloring: triggers =====
+        private void DataGridView2_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            var col = dataGridView2.Columns[e.ColumnIndex].Name;
+            if (col == "desire" || col == "checker" || col == "extra")
+                ApplyDateStatusColorsForRow(dataGridView2.Rows[e.RowIndex]);
+        }
+
+        private void DataGridView2_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
+        {
+            if (dataGridView2.IsCurrentCellDirty)
+                dataGridView2.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        }
+
+        private void DataGridView2_DataBindingComplete(object? sender, DataGridViewBindingCompleteEventArgs e)
+        {
+            ApplyDateStatusColors();
+        }
+
+        // ===== Save / copy / misc =====
         private void btnSaveYeuCau_Click(object sender, EventArgs e)
         {
-            if (modetab == 1)
+            using (SqlConnection conn = new SqlConnection(SQL.GetConnectionString()))
             {
-                foreach (DataGridViewRow row in dataGridView2.Rows)
+                conn.Open();
+                using (SqlTransaction transaction = conn.BeginTransaction())
                 {
-                    if (row.IsNewRow) continue;
-                    string lsx = row.Cells["lsx"]?.Value?.ToString();
-
-                    string date1 = row.Cells["desire"].Value.ToString();
-                    string date2 = row.Cells["checker"].Value.ToString();
-                    string extra = row.Cells["extra"].Value.ToString();
-                    string ghichu = row.Cells["ghichu"]?.Value?.ToString();
-
                     try
                     {
-                        SQL.SaveYeuCauDates(lsx, date1, date2, extra, ghichu);
+                        foreach (DataGridViewRow row in dataGridView2.Rows)
+                        {
+                            if (row.IsNewRow) continue;
+
+                            string lsx = row.Cells["lsx"]?.Value?.ToString();
+
+                            string date1 = row.Cells["desire"].Value?.ToString();
+                            string date2 = row.Cells["checker"].Value?.ToString();
+                            string date3 = row.Cells["extra"].Value?.ToString();
+                            string ghichu = row.Cells["ghichu"]?.Value?.ToString();
+
+                            SQL.SaveYeuCauDates(lsx, date1, date2, date3, ghichu);
+                        }
+                        transaction.Commit();
+                        // Immediately hide rows that already have Ngày Giao Hàng
+                        ExcludeDeliveredRows();
+                        MessageBox.Show("Đã lưu các ngày thành công.", "Thông báo",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show($"Lỗi lưu LSX {lsx}: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        transaction.Rollback();
+                        MessageBox.Show($"Lỗi khi lưu dữ liệu: {ex.Message}", "Lỗi",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
-                MessageBox.Show("Đã lưu các ngày thành công.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
-
-            else if (modetab == 2)
-            {
-                int ok = 0, skip = 0;
-                foreach (DataGridViewRow row in dataGridView2.Rows)
-                {
-                    if (row.IsNewRow) continue;
-
-                    string lsx = row.Cells["lsx"]?.Value?.ToString()?.Trim();
-                    string machine = row.Cells["machine"]?.Value?.ToString()?.Trim();
-
-                    if (string.IsNullOrEmpty(lsx) || string.IsNullOrEmpty(machine)) { skip++; continue; }
-
-                    try
-                    {
-                        SQL.SaveWorkorderMachine(lsx, machine);
-                        ok++;
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Lỗi lưu máy cho LSX {lsx}: {ex.Message}",
-                            "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                }
-                MessageBox.Show($"Đã lưu máy cho {ok} dòng. Bỏ qua {skip} dòng thiếu dữ liệu.",
-                    "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-
-            else if (modetab == 3)
-            {
-                if (string.IsNullOrEmpty(_tab3MachineId))
-                {
-                    MessageBox.Show("Vui lòng chọn máy trong DateSorter.", "Thông báo",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                try
-                {
-                    // 1) Read from the sheet
-                    var dt3 = ReadSheetToDataTable();
-
-                    // 2) Recompute schedule with your existing logic
-                    //    (RecalculateSchedule expects columns: Date, RawDate, ka, sequence, time_needed, etc.)
-                    RecalculateSchedule(dt3);
-
-                    // 3) Persist to SQL (your existing method)
-                    SQL.SavePlanUsingCheckbox(_tab3MachineId, From.Value.Date, dt3);
-
-                    // 4) Save Excel copy
-                    Directory.CreateDirectory(_tab3ExcelArchiveDir);
-                    string fileName = $"KH_Tab3_{_tab3MachineId}_{From.Value:yyyyMMdd}_{DateTime.Now:HHmmss}.xlsx";
-                    string path = Path.Combine(_tab3ExcelArchiveDir, fileName);
-                    _tab3Grid.Save(path, FileFormat.Excel2007);
-
-                    MessageBox.Show("Đã lưu kế hoạch & file Excel.", "Thông báo",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                    // 5) Reload from DB → re-render sheet (shows recalculated start/finish)
-                    LoadTab3PlanGrid();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Lỗi lưu kế hoạch: {ex.Message}", "Lỗi",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-
-
-            else if (modetab == 4)
-            {
-                if (_tab4Table == null || _tab4Table.Rows.Count == 0)
-                {
-                    MessageBox.Show("Không có dữ liệu Ca/Ngày để lưu.", "Thông báo",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                try
-                {
-                    int affected = SQL.SaveShiftDays(_tab4Table); // upsert by Date
-                    MessageBox.Show($"Đã lưu {affected} dòng Ca/Ngày vào bảng Shift.", "Thông báo",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    LoadTab4PlanGrid();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Lỗi lưu Ca/Ngày: {ex.Message}", "Lỗi",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-
-
         }
+
+        // Hide any row that has a real date in column 'extra'
+        private void ExcludeDeliveredRows()
+        {
+            if (dataGridView2?.DataSource is DataView dv && dv.Table != null)
+            {
+                var t = dv.Table;
+                var toRemove = t.AsEnumerable()
+                                .Where(r => HasRealDate(r["extra"]))
+                                .ToList();
+                foreach (var r in toRemove) t.Rows.Remove(r);
+            }
+            else
+            {
+                // fallback: remove from grid
+                foreach (DataGridViewRow r in dataGridView2.Rows.Cast<DataGridViewRow>().ToList())
+                {
+                    if (r.IsNewRow) continue;
+                    if (HasRealDate(r.Cells["extra"]?.Value))
+                        dataGridView2.Rows.Remove(r);
+                }
+            }
+        }
+
+        // shared parser (treat 31/12/1899 etc. as 'no date')
+        private static bool HasRealDate(object v)
+        {
+            if (v == null || v == DBNull.Value) return false;
+            if (v is DateTime dd) return dd.Year > 1901;
+            var s = v.ToString()?.Trim();
+            if (string.IsNullOrEmpty(s)) return false;
+            string[] fmts = { "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "d-M-yyyy", "yyyy-MM-dd", "M/d/yyyy", "MM/dd/yyyy" };
+            if (DateTime.TryParseExact(s, fmts, CultureInfo.GetCultureInfo("vi-VN"),
+                                       DateTimeStyles.None, out var d) ||
+                DateTime.TryParse(s, out d))
+                return d.Year > 1901;
+            return false;
+        }
+
 
         private void chkCopyToAll_Click(object sender, EventArgs e)
         {
-            if (modetab == 4)
-            {
-                if (string.IsNullOrWhiteSpace(_tab4DefaultKa))
-                {
-                    MessageBox.Show("Vui lòng chọn Ca mặc định ở ô 'Default Ka' trước.",
-                        "Thiếu thông tin", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                if (_tab4Table == null || _tab4Table.Rows.Count == 0) return;
-
-                var from = From.Value.Date;
-                var to = To.Value.Date;
-
-                foreach (DataRow r in _tab4Table.Rows)
-                {
-                    var d = r.Field<DateTime>("DateOnly").Date;
-                    if (d < from || d > to) continue;
-
-                    var kaToApply = (d.DayOfWeek == DayOfWeek.Sunday) ? "Nghỉ" : _tab4DefaultKa;
-                    r["ka"] = kaToApply;
-                    r["Machine"] = _tab4MachineId ?? "";
-                    RecalcRowTimes(r);
-                }
-
-
-                // repaint styles (Nghỉ/Sunday grey)
-                foreach (DataGridViewRow gr in dataGridView2.Rows)
-                    ApplyTab4RowStyle(gr);
-
-                dataGridView2.Refresh();
-                MessageBox.Show("Đã áp dụng Ca mặc định cho toàn bộ ngày trong khoảng đã chọn.",
-                    "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            // ====== original (Tab1/2) copy behavior ======
             if (dataGridView2.CurrentRow == null || dataGridView2.CurrentCell == null)
             {
                 MessageBox.Show("Vui lòng chọn một ô cần sao chép.", "Thông báo",
@@ -524,1600 +798,123 @@ namespace APPPC.Functions
                 "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void Sequence_KeyPress(object? sender, KeyPressEventArgs e)
-        {
-            if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar))
-                e.Handled = true;
-        }
-
-        private void MachineCell_KeyPress(object? sender, KeyPressEventArgs e)
-        {
-            // Allow digits and backspace only
-            if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar))
-            {
-                e.Handled = true;
-            }
-        }
-
-        // using System.Globalization;
-
         private void DateSorter_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (!(dataGridView2.DataSource is DataView dv) || dv.Table == null)
+            if (modetab == 2)
+            {
+                var sel = DateSorter.SelectedItem?.ToString() ?? "Chung";
+                FilterTab2ByMachine(sel);
                 return;
+            }
 
-            var table = dv.Table;
-
-            // Choose a column that actually exists (prefer the one we set in Tag)
+            if (dataGridView2.DataSource is not DataView dv || dv.Table == null) { ApplyAllFilters(); return; }
             string filterCol = DateSorter.Tag as string;
-            if (string.IsNullOrEmpty(filterCol) || !table.Columns.Contains(filterCol))
-            {
-                foreach (var c in new[] { "desire", "date_planned_start", "date_planned_finished" })
-                    if (table.Columns.Contains(c)) { filterCol = c; break; }
-            }
+            if (string.IsNullOrEmpty(filterCol) || !dv.Table.Columns.Contains(filterCol)) { ApplyAllFilters(); return; }
+            if (DateSorter.SelectedIndex < 0 || DateSorter.SelectedItem == null) { ApplyAllFilters(); return; }
 
-            // If nothing suitable, clear filter and bail
-            if (string.IsNullOrEmpty(filterCol)) { dv.RowFilter = string.Empty; return; }
-
-            // No selection ⇒ clear filter
-            if (DateSorter.SelectedIndex < 0 || DateSorter.SelectedItem == null)
-            {
-                dv.RowFilter = string.Empty;
-                return;
-            }
-
-            // Items look like "dd/MM/yyyy (N)"; take the date part
             var token = DateSorter.SelectedItem.ToString();
             var datePart = token.Split(' ')[0];
+            if (!DateTime.TryParseExact(datePart, "dd/MM/yyyy", CultureInfo.GetCultureInfo("vi-VN"),
+                                        DateTimeStyles.None, out var d)) { ApplyAllFilters(); return; }
 
-            if (!DateTime.TryParseExact(datePart, "dd/MM/yyyy",
-                CultureInfo.GetCultureInfo("vi-VN"), DateTimeStyles.None, out var d))
-            {
-                dv.RowFilter = string.Empty;
-                return;
-            }
-
-            var from = d.Date;
-            var to = from.AddDays(1);
-
-            // DataView RowFilter expects US-style date literals with #...#
-            dv.RowFilter = string.Format(CultureInfo.InvariantCulture,
-                "{0} >= #{1:MM/dd/yyyy}# AND {0} < #{2:MM/dd/yyyy}#",
-                filterCol, from, to);
-        }
-        private void Tab3_BeforeCellEdit(object? sender, CellBeforeEditEventArgs e)
-        {
-            // block header row
-            if (e.Cell.Row == 0) { e.IsCancelled = true; return; }
-
-            int c = e.Cell.Column;
-            bool editable = c >= 0 && c < _tab3ColMap.Length && _tab3ColMap[c].editable;
-
-            // Only allow editing on columns flagged editable in _tab3ColMap
-            e.IsCancelled = !editable;
-        }
-
-        private void RenderTab3ToSheet(DataTable dt)
-        {
-            EnsureTab3Grid();
-
-            _tab3Sheet.Reset();
-            _tab3Sheet.RowCount = Math.Max(200, dt.Rows.Count + 20);
-            _tab3Sheet.ColumnCount = Math.Max(20, _tab3ColMap.Length + 2);
-
-            // headers
-            for (int c = 0; c < _tab3ColMap.Length; c++)
-                _tab3Sheet[0, c] = _tab3ColMap[c].header;
-
-            _tab3Sheet.FreezeToCell(1, 0);
-
-            int rIndex = 1;
-            foreach (DataRow r in dt.Rows)
-            {
-                for (int c = 0; c < _tab3ColMap.Length; c++)
-                {
-                    var (hdr, field, editable, fmt) = _tab3ColMap[c];
-                    object v = r.Table.Columns.Contains(field) ? r[field] : DBNull.Value;
-
-                    // Boolean => checkbox
-                    if (field == "Date")
-                    {
-                        bool planned = r.Table.Columns.Contains("Date") && r.Field<bool?>("Date") == true;
-                        _tab3Sheet[rIndex, c] = planned;
-                        _tab3Sheet.SetCellBody(rIndex, c, new CheckBoxCell());
-                        continue;
-                    }
-
-                    // normal write
-                    _tab3Sheet[rIndex, c] = (v == DBNull.Value) ? null : v;
-                }
-                rIndex++;
-            }
-
-
-            // simple formats that exist in 3.x
-            for (int c = 0; c < _tab3ColMap.Length; c++)
-            {
-                var (_, field, editable, fmt) = _tab3ColMap[c];
-                var range = new RangePosition(1, c, _tab3Sheet.RowCount - 1, 1);
-
-                if (field is "desire" or "RawDate" or "start_time" or "finish_time")
-                    _tab3Sheet.SetRangeDataFormat(range, CellDataFormatFlag.DateTime);
-                else if (field is "production_qty" or "sequence" or "time_needed")
-                    _tab3Sheet.SetRangeDataFormat(range, CellDataFormatFlag.Number);
-            }
-
-            // "Ca" dropdown using cell body (no DataValidators in 3.x)
-            int kaCol = Array.FindIndex(_tab3ColMap, x => x.field == "ka");
-            if (kaCol >= 0)
-            {
-                for (int r = 1; r <= dt.Rows.Count; r++)
-                {
-                    var dd = new DropdownListCell(_kaOptions);
-                    _tab3Sheet.SetCellBody(r, kaCol, dd);
-                    // seed current value from cell text if any
-                    var current = _tab3Sheet[r, kaCol]?.ToString();
-                    if (!string.IsNullOrWhiteSpace(current))
-                        dd.SelectedItem = current;
-                }
-            }
-
-            for (int c = 0; c < _tab3ColMap.Length; c++)
-                _tab3Sheet.AutoFitColumnWidth(c);
-
-            _tab3Grid.Visible = true;
-            dataGridView2.Visible = false;
-            _tab3Grid.Visible = true;
-            dataGridView2.Visible = false;
+            var from = d.Date; var to = from.AddDays(1);
+            string dateFilter = string.Format(CultureInfo.InvariantCulture,
+                "{0} >= #{1:MM/dd/yyyy}# AND {0} < #{2:MM/dd/yyyy}#", filterCol, from, to);
+            ApplyAllFilters(dateFilter);
         }
 
         private void From_ValueChanged(object sender, EventArgs e)
         {
-            if (modetab == 4) { LoadTab4PlanGrid(); return; }
-            if (modetab == 3) { _tab3StartDate = From.Value.Date; LoadTab3PlanGrid(); return; }
             if (dataGridView2.DataSource is not DataView dv || dv.Table is null) return;
 
-            string baseFilter = BuildBaseFilter();
-            var t = dv.Table;
-            var dateCol = PickExistingColumn(t, "desire", "date_planned_start", "date_planned_finished");
-
-            if (string.IsNullOrEmpty(dateCol)) { dv.RowFilter = baseFilter; return; }
+            var dateCol = PickExistingColumn(dv.Table, "desire", "date_planned_start", "date_planned_finished");
+            if (string.IsNullOrEmpty(dateCol)) { ApplyAllFilters(); return; }
 
             DateTime from = From.Value.Date, to = To.Value.Date.AddDays(1);
             string range = $"{dateCol} >= {HashDate(from)} AND {dateCol} < {HashDate(to)}";
-            dv.RowFilter = CombineFilters(baseFilter, range);
+            ApplyAllFilters(range);
         }
 
-        private void To_ValueChanged(object sender, EventArgs e)
-        {
-            if (modetab == 4) { LoadTab4PlanGrid(); return; }
-            if (dataGridView2.DataSource is not DataView dv || dv.Table is null) return;
-
-            string baseFilter = BuildBaseFilter();
-            var t = dv.Table;
-            var dateCol = PickExistingColumn(t, "desire", "date_planned_start", "date_planned_finished");
-
-            if (string.IsNullOrEmpty(dateCol)) { dv.RowFilter = baseFilter; return; }
-
-            DateTime from = From.Value.Date, to = To.Value.Date.AddDays(1);
-            string range = $"{dateCol} >= {HashDate(from)} AND {dateCol} < {HashDate(to)}";
-            dv.RowFilter = CombineFilters(baseFilter, range);
-        }
-
+        private void To_ValueChanged(object sender, EventArgs e) => From_ValueChanged(sender, e);
 
         private void ShowEmpty_CheckedChanged(object sender, EventArgs e)
         {
             allWorkorders = WorkorderService.LoadPendingWorkorders(dataGridView1, dataGridView2, ShowEmpty, ShowOld, DateSorter, modetab);
             RefreshSearcherItems();
+            if (modetab == 2) FilterTab2ByMachine(DateSorter.SelectedItem?.ToString() ?? "Chung");
+            else ApplyAllFilters();
         }
 
         private void ShowOld_CheckedChanged(object sender, EventArgs e)
         {
             allWorkorders = WorkorderService.LoadPendingWorkorders(dataGridView1, dataGridView2, ShowEmpty, ShowOld, DateSorter, modetab);
             RefreshSearcherItems();
+            if (modetab == 2) FilterTab2ByMachine(DateSorter.SelectedItem?.ToString() ?? "Chung");
+            else ApplyAllFilters();
         }
 
-        private void KHSX_panel_SizeChanged(object sender, EventArgs e)
-        {
-            int rightMargin = 5;
-            int bottomMargin = 10;
-
-            dataGridView2.Width = this.Width - dataGridView2.Location.X - rightMargin;
-            dataGridView2.Height = this.Height - dataGridView2.Location.Y - bottomMargin;
-
-            ArrangeButtonsRight(From, To, DateSorter, chkCopyToAll, button1, btnSaveYeuCau);
-
-            if (_tab3Grid != null)
-            {
-                _tab3Grid.Location = dataGridView2.Location;
-                _tab3Grid.Size = dataGridView2.Size;
-            }
-        }
-
-        private static object GetCellSafe(DataRow r, string col)
-    => r.Table.Columns.Contains(col) ? r[col] : DBNull.Value;
-        private static bool ReadBool(object v)
-        {
-            if (v is bool b) return b;
-            var s = (v?.ToString() ?? "").Trim().ToLowerInvariant();
-            return s == "1" || s == "true" || s == "x" || s == "yes";
-        }
-        private static DateTime? ReadDate(object v)
-        {
-            if (v is DateTime d) return d;
-            if (DateTime.TryParse(v?.ToString(), out var t)) return t;
-            return null;
-        }
-        private static double ReadDouble(object v)
-        {
-            if (v is double d) return d;
-            if (v is float f) return f;
-            double.TryParse(v?.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var x);
-            return x;
-        }
-        private static short? ReadShort(object v)
-        {
-            if (v is short s) return s;
-            if (v is int i) return (short)i;
-            if (short.TryParse(v?.ToString(), out var t)) return t;
-            return null;
-        }
-
-        private DataTable ReadSheetToDataTable()
-        {
-            // shape similar to what SQL.SavePlanUsingCheckbox expects
-            var dt = new DataTable();
-            dt.Columns.Add("Date", typeof(bool));
-            dt.Columns.Add("LSX", typeof(string));
-            dt.Columns.Add("product_code", typeof(string));
-            dt.Columns.Add("product_name", typeof(string));
-            dt.Columns.Add("production_qty", typeof(object));
-            dt.Columns.Add("order_name", typeof(string));
-            dt.Columns.Add("desire", typeof(DateTime));
-            dt.Columns.Add("RawDate", typeof(DateTime));
-            dt.Columns.Add("ka", typeof(string));
-            dt.Columns.Add("sequence", typeof(short));
-            dt.Columns.Add("time_needed", typeof(double));
-            dt.Columns.Add("start_time", typeof(DateTime));
-            dt.Columns.Add("finish_time", typeof(DateTime));
-            dt.Columns.Add("note", typeof(string));
-
-            int rows = Math.Max(_tab3Sheet.MaxContentRow + 1, _tab3Sheet.RowCount);
-            int cols = _tab3ColMap.Length;
-
-            for (int r = 1; r < rows; r++)
-            {
-                // stop when LSX is empty
-                int lsxCol = Array.FindIndex(_tab3ColMap, x => x.field == "LSX");
-                var lsxVal = _tab3Sheet[r, lsxCol];
-                var lsx = (lsxVal?.ToString() ?? "").Trim();
-                if (string.IsNullOrEmpty(lsx)) continue;
-
-                var row = dt.NewRow();
-                for (int c = 0; c < cols; c++)
-                {
-                    var (hdr, field, editable, fmt) = _tab3ColMap[c];
-                    var v = _tab3Sheet[r, c];
-
-                    switch (field)
-                    {
-                        case "Date": row["Date"] = ReadBool(v); break;
-                        case "RawDate":
-                        case "desire":
-                        case "start_time":
-                        case "finish_time":
-                            var d = ReadDate(v); row[field] = d.HasValue ? d.Value : (object)DBNull.Value; break;
-                        case "sequence":
-                            var s = ReadShort(v); row["sequence"] = s.HasValue ? s.Value : (object)DBNull.Value; break;
-                        case "time_needed":
-                            row["time_needed"] = ReadDouble(v); break;
-                        default:
-                            row[field] = v == null || string.IsNullOrWhiteSpace(v.ToString()) ? (object)DBNull.Value : v;
-                            break;
-                    }
-                }
-                dt.Rows.Add(row);
-            }
-
-            return dt;
-        }
-
-
-        private void ApplyPlannedRowStyle(DataGridViewRow row)
-        {
-            try
-            {
-                if (row?.Cells["Date"] == null) return;
-                bool planned = row.Cells["Date"].Value != DBNull.Value && Convert.ToBoolean(row.Cells["Date"].Value);
-                row.DefaultCellStyle.BackColor = planned ? Color.LightBlue : SystemColors.Window;
-            }
-            catch (Exception)
-            {
-            }
-        }
-
-        private void RecomputeSequenceAndSort()
-        {
-            if (dataGridView2.DataSource is not DataTable dt) return;
-
-            var planned = dt.AsEnumerable()
-                .Where(r => r.Field<bool?>("Date") == true)
-                .ToList();
-
-            // guarantee all have a start_time to sort by
-            foreach (var r in planned)
-            {
-                if (r["start_time"] == DBNull.Value)
-                {
-                    var day = (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date;
-                    var ka = (r["ka"]?.ToString() ?? DefaultShiftName);
-                    var (s, _) = ShiftWindow(day, ka);
-                    r["start_time"] = s;
-                }
-            }
-
-            // assign sequence per day using start_time asc
-            foreach (var g in planned.GroupBy(r => ((DateTime)r["start_time"]).Date))
-            {
-                short seq = 1;
-                foreach (var r in g.OrderBy(r => r.Field<DateTime>("start_time"))
-                                   .ThenBy(r => r.Field<string?>("LSX") ?? string.Empty))
-                {
-                    r["sequence"] = seq++;
-                }
-            }
-
-            // clear sequence for non-planned rows
-            foreach (var r in dt.AsEnumerable().Where(r => !(r.Field<bool?>("Date") ?? false)))
-                r["sequence"] = DBNull.Value;
-
-            // keep the grid aligned with what we calculated
-            if (dataGridView2.Columns.Contains("start_time"))
-                dataGridView2.Sort(dataGridView2.Columns["start_time"], ListSortDirection.Ascending);
-        }
-
-        private static double GetHours(DataRow r)
-        {
-            if (r.Table.Columns.Contains("time_needed") && r["time_needed"] != DBNull.Value &&
-                double.TryParse(r["time_needed"]?.ToString(), out var h)) return h;
-            return 0d;
-        }
-
-        private string? PickExistingColumn(DataTable table, params string[] candidates)
-        {
-            foreach (var c in candidates)
-                if (table.Columns.Contains(c)) return c;
-            return null;
-        }
-
-        private string BuildBaseFilter()
-        {
-            if (dataGridView2.DataSource is not DataView dv || dv.Table is null)
-                return string.Empty;
-
-            var t = dv.Table;
-            var parts = new List<string>();
-
-            if (!ShowEmpty.Checked)
-            {
-                // only require fields that actually exist in this table
-                var nonEmptyChecks = new List<string>();
-                if (t.Columns.Contains("lsx")) nonEmptyChecks.Add("(NOT (lsx IS NULL OR lsx=''))");
-                if (t.Columns.Contains("product_code")) nonEmptyChecks.Add("(NOT (product_code IS NULL OR product_code=''))");
-                if (t.Columns.Contains("product_name")) nonEmptyChecks.Add("(NOT (product_name IS NULL OR product_name=''))");
-                if (t.Columns.Contains("order_name")) nonEmptyChecks.Add("(NOT (order_name IS NULL OR order_name=''))");
-                if (nonEmptyChecks.Count > 0) parts.Add(string.Join(" AND ", nonEmptyChecks));
-
-                if (t.Columns.Contains("can_sx")) parts.Add("can_sx > 0");
-            }
-
-            // prefer a date column that exists for the current tab
-            var dateCol = PickExistingColumn(t, "date_planned_start", "desire", "date_planned_finished");
-            if (!string.IsNullOrEmpty(dateCol))
-                parts.Add($"{dateCol} >= {HashDate(DateTime.Today.AddYears(-1))}");
-
-            return string.Join(" AND ", parts);
-        }
-
-
-        private DataTable BuildTab4Table(DateTime from, DateTime to)
-        {
-            var dt = new DataTable();
-            dt.Columns.Add("DateOnly", typeof(DateTime));
-            dt.Columns.Add("ka", typeof(string));
-            dt.Columns.Add("start_time", typeof(DateTime));
-            dt.Columns.Add("end_time", typeof(DateTime));
-            dt.Columns.Add("note", typeof(string));
-            dt.Columns.Add("Machine", typeof(string));
-
-            // NEW: pull existing rows for this machine & range
-            var existing = SQL.LoadShiftDays(_tab4MachineId ?? "", from, to);
-
-            for (var d = from.Date; d <= to.Date; d = d.AddDays(1))
-            {
-                var r = dt.NewRow();
-                r["DateOnly"] = d;
-                r["Machine"] = _tab4MachineId ?? "";
-
-                if (existing.TryGetValue(d, out var val))
-                {
-                    // Normalize to your defined keys (“Ca 2 dài”, etc.)
-                    var normalized = NormalizeKaKey(val.Shift);
-                    if (!string.IsNullOrWhiteSpace(normalized)) r["ka"] = normalized; else r["ka"] = DBNull.Value;
-
-                    if (!string.IsNullOrWhiteSpace(val.Note)) r["note"] = val.Note; else r["note"] = DBNull.Value;
-                }
-                else
-                {
-                    r["ka"] = DBNull.Value;
-                    r["note"] = DBNull.Value;
-                }
-
-                dt.Rows.Add(r);
-                RecalcRowTimes(r); // compute start/end from ka (or leave blank if ka is null)
-            }
-            return dt;
-        }
-
-        private void CompactPlanOrder(DataTable dt)
-        {
-            var planned = dt.AsEnumerable()
-                .Where(r => r.Field<bool?>("Date") == true)
-                .OrderBy(r => r.Field<int?>("plan_order") ?? int.MaxValue)
-                .ThenBy(r => r.Field<string?>("LSX") ?? string.Empty)
-                .ToList();
-
-            int i = 1;
-            foreach (var r in planned) r["plan_order"] = i++;
-        }
-
-        private int NextPlanOrder(DataTable dt)
-        {
-            return dt.AsEnumerable().Count(r => r.Field<bool?>("Date") == true) + 1;
-        }
-
-        private DateTime AlignToShiftStart(DateTime t, string ka, int addOffOnce = 0, bool applySkip = false)
-        {
-            var (s, e) = ShiftWindow(t.Date, ka);
-            if (t < s) return s;
-            if (t >= e)
-            {
-                var next = t.Date.AddDays(1 + (applySkip ? addOffOnce : 0));
-                return ShiftWindow(next, ka).start;
-            }
-            return t;
-        }
-
-        private DateTime FinishAcrossShifts(DateTime start, double hours, string ka, int skipDays)
-        {
-            bool firstJump = true;
-            DateTime cursor = start;
-            while (hours > 1e-9)
-            {
-                var (dayStart, dayEnd) = ShiftWindow(cursor.Date, ka);
-                if (cursor < dayStart) cursor = dayStart;
-                if (cursor >= dayEnd)
-                {
-                    var add = 1 + (firstJump ? Math.Max(0, skipDays) : 0);
-                    cursor = ShiftWindow(cursor.Date.AddDays(add), ka).start;
-                    firstJump = false;
-                    continue;
-                }
-
-                var room = (dayEnd - cursor).TotalHours;
-                if (hours <= room)
-                {
-                    return cursor.AddHours(hours);
-                }
-
-                hours -= room;
-                var add2 = 1 + (firstJump ? Math.Max(0, skipDays) : 0);
-                cursor = ShiftWindow(cursor.Date.AddDays(add2), ka).start;
-                firstJump = false;
-            }
-
-            return cursor;
-        }
-
-        private (DateTime start, DateTime end) ShiftWindow(DateTime day, string? ka)
-        {
-            var key = string.IsNullOrWhiteSpace(ka) ? DefaultShiftName : ka!;
-            if (!_shifts.TryGetValue(key, out var s)) s = _shifts[DefaultShiftName];
-
-            var start = day.Date + s.start;
-            // if no end configured, treat as 24h
-            var end = s.end.HasValue ? (day.Date + s.end.Value) : start.AddHours(24);
-            // night shift crosses midnight
-            if (s.end.HasValue && s.end.Value <= s.start) end = end.AddDays(1);
-            return (start, end);
-        }
-
-        private void ApplyShiftToDay(DataTable dt, DateTime day, string ka)
-        {
-            foreach (var r in dt.AsEnumerable()
-                                .Where(r => r.Field<DateTime?>("RawDate")?.Date == day.Date))
-                r["ka"] = string.IsNullOrWhiteSpace(ka) ? DefaultShiftName : ka;
-        }
-
-        private string? GetSavedDayShift(IEnumerable<DataRow> rows, DateTime day)
-        {
-            return rows
-                .Where(x => ((x.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date == day.Date))
-                .OrderBy(x => x.Field<short?>("sequence") ?? short.MaxValue)   // seq=1 first
-                .Select(x => (x["ka"]?.ToString() ?? "").Trim())
-                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
-        }
-
-        private void RecalculateSchedule(DataTable dt)
-        {
-            var rows = dt.AsEnumerable()
-                .Where(r => r.Field<bool?>("Date") == true)
-                .OrderBy(r => r.Field<int?>("plan_order") ?? int.MaxValue)
-                .ThenBy(r => r.Field<string?>("LSX") ?? string.Empty)
-                .ToList();
-
-            // ✅ Nothing planned yet → clear any stale values and exit (avoids Min/Max on empty).
-            if (rows.Count == 0)
-            {
-                // Guarded clears in case columns exist
-                bool hasSeq = dt.Columns.Contains("sequence");
-                bool hasST = dt.Columns.Contains("start_time");
-                bool hasFT = dt.Columns.Contains("finish_time");
-                foreach (DataRow r in dt.Rows)
-                {
-                    if (hasSeq) r["sequence"] = DBNull.Value;
-                    if (hasST) r["start_time"] = DBNull.Value;
-                    if (hasFT) r["finish_time"] = DBNull.Value;
-                }
-                return;
-            }
-
-            // ✅ Only compute the range after we know there is at least one planned row
-            var rangeStart = rows.Min(r => (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date);
-            var rangeEnd = rows.Max(r => (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date);
-
-            // Your existing preload of DB shifts (from Tab4)
-            var dbShiftMap = SQL.LoadShiftDays(_tab3MachineId ?? "", rangeStart, rangeEnd);
-
-            // helper: lấy ca cho 1 ngày, nếu không có trong DB thì dùng Bình thường
-            string ShiftFor(DateTime d)
-            {
-                if (dbShiftMap.TryGetValue(d.Date, out var s) && !string.IsNullOrWhiteSpace(s.Shift))
-                    return NormalizeKaKey(s.Shift);
-                return DefaultShiftName; // "Bình thường"
-            }
-
-            // helper: đưa thời điểm về slot làm việc đầu tiên ≥ t (bỏ qua ngày Nghỉ)
-            DateTime AlignToFirstWorkingSlot(DateTime t)
-            {
-                DateTime d = t.Date;
-                while (ShiftFor(d) == "Nghỉ") d = d.AddDays(1);            // skip off-day(s)
-                var (st, _) = ShiftWindow(d, ShiftFor(d));
-                return (t <= st) ? st : t;
-            }
-
-            // helper: chạy qua lịch theo từng ngày (skip ngày Nghỉ) cho đến khi hết giờ
-            DateTime FinishAcrossCalendar(DateTime start, double hours)
-            {
-                DateTime cur = AlignToFirstWorkingSlot(start);
-                while (hours > 1e-9)
-                {
-                    var day = cur.Date;
-                    var ka = ShiftFor(day);
-                    if (ka == "Nghỉ") { cur = AlignToFirstWorkingSlot(day.AddDays(1)); continue; }
-
-                    var (st, en) = ShiftWindow(day, ka);
-                    if (cur < st) cur = st;
-                    if (cur >= en) { cur = AlignToFirstWorkingSlot(day.AddDays(1)); continue; }
-
-                    var room = (en - cur).TotalHours;
-                    if (hours <= room) return cur.AddHours(hours);
-
-                    hours -= room;
-                    cur = AlignToFirstWorkingSlot(day.AddDays(1));
-                }
-                return cur;
-            }
-
-            DateTime? lastFinish = null;
-            DateTime? prevStartDay = null;
-            int seq = 1;
-
-            foreach (var r in rows)
-            {
-                var hours = GetHours(r);
-                var baseDay = (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date;
-
-                // tìm ngày làm việc đầu tiên ≥ baseDay
-                var seed = AlignToFirstWorkingSlot(baseDay);
-                var start = (lastFinish == null) ? seed : AlignToFirstWorkingSlot(lastFinish.Value);
-
-                if (prevStartDay == null || start.Date != prevStartDay.Value.Date)
-                {
-                    seq = 1;
-                    prevStartDay = start.Date;
-                    ApplyShiftToDay(dt, start.Date, ShiftFor(start.Date)); // ghi Ka của ngày thực tế
-                }
-
-                var finish = FinishAcrossCalendar(start, hours);
-
-                r["RawDate"] = start.Date;
-                r["ka"] = ShiftFor(start.Date);
-                r["sequence"] = (short)seq;
-                r["start_time"] = start;
-                r["finish_time"] = finish;
-
-                lastFinish = finish;
-                seq++;
-            }
-
-            if (dataGridView2.Columns.Contains("start_time"))
-                dataGridView2.Sort(dataGridView2.Columns["start_time"], ListSortDirection.Ascending);
-
-        }
-
-
-        private static string StripDiacritics(string s)
-        {
-            var formD = s.Normalize(NormalizationForm.FormD);
-            var sb = new StringBuilder(formD.Length);
-            foreach (var ch in formD)
-                if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
-                    sb.Append(char.ToLowerInvariant(ch));
-            return sb.ToString().Normalize(NormalizationForm.FormC);
-        }
-
-        private string NormalizeKaKey(string? ka)
-        {
-            if (string.IsNullOrWhiteSpace(ka)) return DefaultShiftName;
-
-            static string Canon(string s)
-            {
-                // remove diacritics, spaces and punctuation; lowercase
-                var formD = s.Normalize(NormalizationForm.FormD);
-                var sb = new StringBuilder(formD.Length);
-                foreach (var ch in formD)
-                {
-                    var cat = CharUnicodeInfo.GetUnicodeCategory(ch);
-                    if (cat == UnicodeCategory.NonSpacingMark) continue;
-                    if (char.IsWhiteSpace(ch) || ch == '-' || ch == '_' || ch == '/' || ch == '.') continue;
-                    sb.Append(char.ToLowerInvariant(ch));
-                }
-                return sb.ToString().Normalize(NormalizationForm.FormC);
-            }
-
-            var t = Canon(ka);
-
-            // 1) exact match against our defined keys (after canonicalization)
-            foreach (var k in _shifts.Keys)
-                if (Canon(k) == t) return k;
-
-            // 2) tolerant aliases commonly stored in SQL
-            var alias = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["binhthuong"] = "Bình thường",
-                ["bt"] = "Bình thường",
-
-                ["ca1"] = "Ca 1",
-                ["1ca"] = "Ca 1",
-
-                ["ca2"] = "Ca 2",
-                ["2shift"] = "2 Ca",
-                ["2ca"] = "2 Ca",
-
-                ["cadai"] = "Ca dài",
-                ["ca1dai"] = "Ca 1 dài",
-                ["ca2dai"] = "Ca 2 dài",
-
-                ["3ka"] = "3 Ka",
-                ["3k"] = "3 Ka",
-                ["ca3"] = "3 Ka",
-
-                ["ka4h"] = "Ka 4H",
-                ["4h"] = "Ka 4H",
-
-                ["ca10h"] = "Ca dài 10h",
-                ["ca11h"] = "Ca dài 11h",
-
-                ["nghi"] = "Nghỉ",
-            };
-
-            if (alias.TryGetValue(t, out var std)) return std;
-
-            return DefaultShiftName;
-        }
-
-
-        private void LoadTab4PlanGrid()
-        {
-            modetab = 4;
-
-            // show both pickers and machine picker
-            From.Visible = true;
-            To.Visible = true;
-            DateSorter.Visible = true;                         // <— show machine list
-            DateSorter.Items.Clear();
-            foreach (var m in SQL.LoadMachineListForPlan()) DateSorter.Items.Add(m);
-            if (DateSorter.Items.Count > 0)
-            {
-                if (DateSorter.SelectedIndex < 0) DateSorter.SelectedIndex = 0;
-                _tab4MachineId = DateSorter.SelectedItem?.ToString();
-            }
-
-            _tab4Table = BuildTab4Table(From.Value.Date, To.Value.Date);
-
-            // grid columns (same as before) ...
-            dataGridView2.DataSource = _tab4Table;
-            dataGridView2.AutoGenerateColumns = false;
-            dataGridView2.Columns.Clear();
-
-            var colDate = new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "DateOnly",
-                Name = "DateOnly",
-                HeaderText = "Ngày",
-                ReadOnly = true,
-                DefaultCellStyle = { Format = "dd/MM/yyyy" }
-            };
-            dataGridView2.Columns.Add(colDate);
-
-            var colKa = new DataGridViewComboBoxColumn
-            {
-                DataPropertyName = "ka",
-                Name = "ka",
-                HeaderText = "Ca",
-                FlatStyle = FlatStyle.Flat
-            };
-            colKa.Items.AddRange(_kaOptions);
-            dataGridView2.Columns.Add(colKa);
-
-            var colSt = new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "start_time",
-                Name = "start_time",
-                HeaderText = "Giờ bắt đầu",
-                ReadOnly = true,
-                DefaultCellStyle = { Format = "dd/MM/yyyy HH:mm" }
-            };
-            var colEn = new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "end_time",
-                Name = "end_time",
-                HeaderText = "Giờ kết thúc",
-                ReadOnly = true,
-                DefaultCellStyle = { Format = "dd/MM/yyyy HH:mm" }
-            };
-            dataGridView2.Columns.Add(colSt);
-            dataGridView2.Columns.Add(colEn);
-
-            var colNote = new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "note",
-                Name = "note",
-                HeaderText = "Ghi chú"
-            };
-            dataGridView2.Columns.Add(colNote);
-
-            dataGridView2.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            dataGridView2.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
-
-            // style/handlers
-            dataGridView2.RowPrePaint -= dataGridView2_RowPrePaint_Tab4;
-            dataGridView2.RowPrePaint += dataGridView2_RowPrePaint_Tab4;
-
-            dataGridView2.CellValueChanged -= dataGridView2_CellValueChanged_Tab4;
-            dataGridView2.CellValueChanged += dataGridView2_CellValueChanged_Tab4;
-
-            dataGridView2.CurrentCellDirtyStateChanged -= dataGridView2_CurrentCellDirtyStateChanged_Tab4Commit;
-            dataGridView2.CurrentCellDirtyStateChanged += dataGridView2_CurrentCellDirtyStateChanged_Tab4Commit;
-
-            dataGridView2.EditingControlShowing -= dataGridView2_EditingControlShowing_Tab4;
-            dataGridView2.EditingControlShowing += dataGridView2_EditingControlShowing_Tab4;
-
-            if (_tab4Table != null)
-            {
-                _tab4Table.ColumnChanged -= _tab4Table_ColumnChanged;
-                _tab4Table.ColumnChanged += _tab4Table_ColumnChanged;
-            }
-
-            dataGridView2.EditMode = DataGridViewEditMode.EditOnEnter;
-        }
-
-        private void LoadTab3PlanGrid()
-        {
-            try
-            {
-                if (modetab != 3 || string.IsNullOrEmpty(_tab3MachineId)) return;
-
-                // ---------- helpers ----------
-                string NormalizeTextLocal(string? s)
-                {
-                    if (string.IsNullOrWhiteSpace(s)) return "";
-                    string noDia = StripDiacritics(s);
-                    var compact = System.Text.RegularExpressions.Regex.Replace(noDia, @"\s+", " ").Trim();
-                    return compact.ToLowerInvariant();
-                }
-                string? DetectCategoryFromMachineIdLocal(string? machineId)
-                {
-                    if (string.IsNullOrWhiteSpace(machineId)) return null;
-                    foreach (var kv in categoryKeywords)
-                        if (kv.Value.Any(k => machineId.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0))
-                            return kv.Key;
-                    return null;
-                }
-                double? ResolveStepHoursLocal(
-                    string lsx, string? stepHint, string? machineId,
-                    Dictionary<string, List<(string Step, double Hours)>> allSteps)
-                {
-                    if (!allSteps.TryGetValue(lsx, out var list) || list.Count == 0) return null;
-
-                    if (!string.IsNullOrWhiteSpace(stepHint))
-                    {
-                        var hintN = NormalizeTextLocal(stepHint);
-                        var exact = list.FirstOrDefault(t => NormalizeTextLocal(t.Step) == hintN);
-                        if (!string.IsNullOrEmpty(exact.Step)) return exact.Hours;
-
-                        var contains = list.FirstOrDefault(t =>
-                        {
-                            var stepN = NormalizeTextLocal(t.Step);
-                            return stepN.Contains(hintN) || hintN.Contains(stepN);
-                        });
-                        if (!string.IsNullOrEmpty(contains.Step)) return contains.Hours;
-                    }
-                    var cat = DetectCategoryFromMachineIdLocal(machineId);
-                    if (!string.IsNullOrEmpty(cat) && categoryKeywords.TryGetValue(cat, out var keys))
-                    {
-                        var match = list.FirstOrDefault(t => keys.Any(k => t.Step.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0));
-                        if (!string.IsNullOrEmpty(match.Step)) return match.Hours;
-                    }
-                    var nz = list.FirstOrDefault(t => t.Hours > 0);
-                    if (!string.IsNullOrEmpty(nz.Step)) return nz.Hours;
-
-                    var mx = list.OrderByDescending(t => t.Hours).FirstOrDefault();
-                    return !string.IsNullOrEmpty(mx.Step) ? mx.Hours : (double?)null;
-                }
-                // --------------------------------
-
-                var dt = SQL.LoadPlanForMachineFromDate(_tab3MachineId, _tab3StartDate);
-
-                // add/prepare expected columns
-                if (!dt.Columns.Contains("Date")) dt.Columns.Add("Date", typeof(bool));
-                foreach (DataRow r in dt.Rows)
-                {
-                    bool planned = r["RawDate"] != DBNull.Value && ((DateTime)r["RawDate"]).Date >= _tab3StartDate;
-                    r["Date"] = planned;
-                }
-                if (!dt.Columns.Contains("product_name")) dt.Columns.Add("product_name", typeof(string));
-                if (!dt.Columns.Contains("product_code")) dt.Columns.Add("product_code", typeof(string));
-                if (!dt.Columns.Contains("production_qty")) dt.Columns.Add("production_qty", typeof(object));
-                if (!dt.Columns.Contains("order_name")) dt.Columns.Add("order_name", typeof(string));
-                if (!dt.Columns.Contains("desire")) dt.Columns.Add("desire", typeof(DateTime));
-                if (!dt.Columns.Contains("note")) dt.Columns.Add("note", typeof(string));
-                if (!dt.Columns.Contains("time_needed")) dt.Columns.Add("time_needed", typeof(double));
-                if (!dt.Columns.Contains("start_time")) dt.Columns.Add("start_time", typeof(DateTime));
-                if (!dt.Columns.Contains("finish_time")) dt.Columns.Add("finish_time", typeof(DateTime));
-                if (!dt.Columns.Contains("ka")) dt.Columns.Add("ka", typeof(string));
-                if (!dt.Columns.Contains("plan_order")) dt.Columns.Add("plan_order", typeof(int));
-
-                // stable plan_order seed
-                var plannedAtLoad = dt.AsEnumerable()
-                    .Where(r => r.Field<bool?>("Date") == true)
-                    .OrderBy(r => r.Field<DateTime?>("RawDate") ?? DateTime.MaxValue)
-                    .ThenBy(r => r.Field<short?>("sequence") ?? short.MaxValue)
-                    .ThenBy(r => r.Field<string?>("LSX") ?? string.Empty)
-                    .ToList();
-                int seed = 1; foreach (var r in plannedAtLoad) r["plan_order"] = seed++;
-
-                // try to fill meta from cached Tab1/2 data
-                if (allWorkorders != null && allWorkorders.Columns.Contains("lsx"))
-                {
-                    var idx = allWorkorders.AsEnumerable()
-                        .GroupBy(r => NormalizeLsxKey(r["lsx"]))
-                        .ToDictionary(g => g.Key, g => g.First());
-
-                    foreach (DataRow r in dt.Rows)
-                    {
-                        var key = NormalizeLsxKey(r["LSX"]);
-                        if (idx.TryGetValue(key, out var src))
-                        {
-                            r["product_name"] = src.Table.Columns.Contains("product_name") ? src["product_name"] : DBNull.Value;
-                            r["product_code"] = src.Table.Columns.Contains("product_code") ? src["product_code"] : DBNull.Value;
-                            r["production_qty"] = src.Table.Columns.Contains("production_qty") ? src["production_qty"] : DBNull.Value;
-                            r["order_name"] = src.Table.Columns.Contains("order_name") ? src["order_name"] : DBNull.Value;
-                            r["desire"] = src.Table.Columns.Contains("desire") ? src["desire"] : DBNull.Value;
-                        }
-                    }
-                }
-
-                // fetch any still-missing meta from Postgres
-                var toFetch = dt.AsEnumerable()
-                    .Where(r => string.IsNullOrWhiteSpace(r["product_name"]?.ToString())
-                             && string.IsNullOrWhiteSpace(r["product_code"]?.ToString())
-                             && (r["production_qty"] == DBNull.Value || string.IsNullOrWhiteSpace(r["production_qty"]?.ToString())))
-                    .Select(r => (r["LSX"]?.ToString() ?? "").Trim())
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-
-                if (toFetch.Length > 0)
-                {
-                    using var conn = new Npgsql.NpgsqlConnection(SQL.PostGreSQLConnectionString);
-                    conn.Open();
-                    const string metaSql = @"
-WITH base AS (
-  SELECT mp.id AS production_id, mp.sophieu AS lsx, mp.product_id, mp.product_qty AS mo_qty
-  FROM mrp_production mp
-),
-pick AS (
-  SELECT sm.production_id,
-         MIN(COALESCE(sm.date_expected, sm.date, sp.date_done))::date AS giao_date,
-         SUM(sm.product_uom_qty) AS move_qty,
-         MIN(sp.origin) AS so_name
-  FROM stock_move sm
-  LEFT JOIN stock_picking sp ON sp.id = sm.picking_id
-  WHERE sm.production_id IS NOT NULL AND (sm.state IS NULL OR sm.state <> 'cancel')
-  GROUP BY sm.production_id
-),
-sol AS (
-  SELECT so.name AS so_name, sol.product_id, SUM(sol.product_uom_qty) AS so_line_qty
-  FROM sale_order_line sol
-  JOIN sale_order so ON so.id = sol.order_id
-  GROUP BY so.name, sol.product_id
-),
-done AS (
-  SELECT wo.production_id, COALESCE(SUM(wo.qty_produced), 0) AS qty_done
-  FROM mrp_workorder wo
-  GROUP BY wo.production_id
-),
-ranked AS (
-  SELECT
-    mp.sophieu AS lsx,
-    r.name     AS routing_name,
-    COALESCE(NULLIF(wo.routing_equip_name,''),'Thành Phẩm') AS workorder_name,
-    CAST(wo.date_planned_start AS date) AS date_planned_start,
-    pick.so_name AS order_name,
-    COALESCE(sol.so_line_qty, pick.move_qty, 0) AS production_qty,
-    pick.giao_date AS date_planned_finished,
-    GREATEST(COALESCE(sol.so_line_qty, pick.move_qty, 0) - COALESCE(d.qty_done, 0), 0) AS can_sx,
-    ROW_NUMBER() OVER (
-      PARTITION BY mp.sophieu
-      ORDER BY CASE wo.state WHEN 'ready' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
-               wo.date_planned_start DESC
-    ) AS rn
-  FROM mrp_production_data pd
-  JOIN mrp_workorder  wo ON pd.production_id = wo.production_id
-  JOIN mrp_production mp ON pd.production_id = mp.id
-  JOIN mrp_routing    r  ON mp.routing_id    = r.id
-  LEFT JOIN base  b   ON b.production_id  = mp.id
-  LEFT JOIN pick  pick ON pick.production_id = mp.id
-  LEFT JOIN sol   sol  ON sol.so_name = pick.so_name AND sol.product_id = b.product_id
-  LEFT JOIN done  d    ON d.production_id = mp.id
-  WHERE wo.state <> 'cancel'
-)
-SELECT
-  lsx,
-  split_part(routing_name,' ',1) AS product_code,
-  ltrim(routing_name, split_part(routing_name,' ',1)) AS product_name,
-  order_name,
-  production_qty,
-  date_planned_finished
-FROM ranked
-WHERE rn = 1 AND lsx = ANY(@lsx);";
-                    using var cmd = new Npgsql.NpgsqlCommand(metaSql, conn);
-                    cmd.Parameters.Add("@lsx", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text).Value = toFetch;
-                    using var rd = cmd.ExecuteReader();
-                    var meta = new Dictionary<string, (string code, string name, string order, object qty, DateTime? giao)>(StringComparer.OrdinalIgnoreCase);
-                    while (rd.Read())
-                    {
-                        var lsx = (rd["lsx"]?.ToString() ?? "").Trim();
-                        var code = (rd["product_code"]?.ToString() ?? "").Trim();
-                        var name = (rd["product_name"]?.ToString() ?? "").Trim();
-                        var ord = (rd["order_name"]?.ToString() ?? "").Trim();
-                        var qty = rd["production_qty"] ?? DBNull.Value;
-                        DateTime? giao = rd.IsDBNull(rd.GetOrdinal("date_planned_finished")) ? (DateTime?)null : Convert.ToDateTime(rd["date_planned_finished"]);
-                        meta[lsx] = (code, name, ord, qty, giao);
-                    }
-                    foreach (DataRow r in dt.Rows)
-                    {
-                        var lsx = (r["LSX"]?.ToString() ?? "").Trim();
-                        if (string.IsNullOrWhiteSpace(lsx)) continue;
-                        if (meta.TryGetValue(lsx, out var m))
-                        {
-                            if (string.IsNullOrWhiteSpace(r["product_code"]?.ToString())) r["product_code"] = m.code;
-                            if (string.IsNullOrWhiteSpace(r["product_name"]?.ToString())) r["product_name"] = m.name;
-                            if (string.IsNullOrWhiteSpace(r["order_name"]?.ToString())) r["order_name"] = m.order;
-                            if (r["production_qty"] == DBNull.Value || string.IsNullOrWhiteSpace(r["production_qty"]?.ToString()))
-                                r["production_qty"] = m.qty;
-                            if (dt.Columns.Contains("desire") && r["desire"] == DBNull.Value && m.giao.HasValue)
-                                r["desire"] = m.giao.Value;
-                        }
-                    }
-                }
-
-                // pick Ka from Shift table (by machine), fallback Tab4, else default
-                DateTime minDay = plannedAtLoad.Count > 0
-                    ? plannedAtLoad.Min(r => (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date)
-                    : _tab3StartDate;
-                DateTime maxDay = plannedAtLoad.Count > 0
-                    ? plannedAtLoad.Max(r => (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date)
-                    : _tab3StartDate;
-
-                var dbShiftsByDate = SQL.LoadShiftDays(_tab3MachineId ?? "", minDay, maxDay)
-                                      .GroupBy(kv => kv.Key.Date)
-                                      .ToDictionary(g => g.Key, g => g.Last().Value);
-
-                foreach (DataRow r in dt.Rows)
-                {
-                    if (r.Field<bool?>("Date") != true) continue;
-
-                    var day = (r.Field<DateTime?>("RawDate") ?? _tab3StartDate).Date;
-                    bool set = false;
-
-                    if (dbShiftsByDate.TryGetValue(day, out var v) && !string.IsNullOrWhiteSpace(v.Shift))
-                    {
-                        r["ka"] = NormalizeKaKey(v.Shift);
-                        set = true;
-                    }
-                    if (!set && _tab4Table != null &&
-                        string.Equals(_tab4MachineId, _tab3MachineId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        var row4 = _tab4Table.AsEnumerable().FirstOrDefault(x => x.Field<DateTime>("DateOnly").Date == day);
-                        var ka4 = row4?.Field<string?>("ka");
-                        if (!string.IsNullOrWhiteSpace(ka4))
-                        {
-                            r["ka"] = NormalizeKaKey(ka4);
-                            set = true;
-                        }
-                    }
-                    if (!set && string.IsNullOrWhiteSpace(r["ka"]?.ToString()))
-                        r["ka"] = DefaultShiftName;
-                }
-
-                // build time_needed from mrp_workorder.sogio_can
-                var lsxList = dt.AsEnumerable()
-                                .Select(r => (r["LSX"]?.ToString() ?? "").Trim())
-                                .Where(s => !string.IsNullOrWhiteSpace(s))
-                                .Distinct(StringComparer.OrdinalIgnoreCase)
-                                .ToList();
-
-                var allSteps = new Dictionary<string, List<(string Step, double Hours)>>(StringComparer.OrdinalIgnoreCase);
-                if (lsxList.Count > 0)
-                {
-                    using var conn = new Npgsql.NpgsqlConnection(SQL.PostGreSQLConnectionString);
-                    conn.Open();
-                    const string sql = @"
-SELECT mp.sophieu AS lsx,
-       COALESCE(NULLIF(wo.routing_equip_name,''),'Thành Phẩm') AS workorder_name,
-       COALESCE(wo.sogio_can, 0) AS sogio_can
-FROM mrp_workorder wo
-JOIN mrp_production mp ON mp.id = wo.production_id
-WHERE mp.sophieu = ANY(@lsx);";
-                    using var cmd = new Npgsql.NpgsqlCommand(sql, conn);
-                    cmd.Parameters.Add("@lsx", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text).Value = lsxList.ToArray();
-                    using var rd = cmd.ExecuteReader();
-                    while (rd.Read())
-                    {
-                        var lsx = (rd["lsx"]?.ToString() ?? "").Trim();
-                        var step = (rd["workorder_name"]?.ToString() ?? "Thành Phẩm").Trim();
-                        var hrs = Convert.ToDouble(rd["sogio_can"] ?? 0d);
-                        if (!allSteps.TryGetValue(lsx, out var list)) { list = new(); allSteps[lsx] = list; }
-                        list.Add((step, hrs));
-                    }
-                }
-
-                foreach (DataRow r in dt.Rows)
-                {
-                    var lsx = (r["LSX"]?.ToString() ?? "").Trim();
-                    string? hint = dt.Columns.Contains("workorder_name") ? r["workorder_name"]?.ToString() : null;
-                    var hours = ResolveStepHoursLocal(lsx, hint, _tab3MachineId, allSteps);
-                    if (hours.HasValue) r["time_needed"] = hours.Value;
-                    UpdateStartFinishForRow(r);
-                }
-
-                // bind grid
-                dataGridView2.DataSource = dt;
-                dataGridView2.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-                dataGridView2.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
-
-                if (dataGridView2.Columns.Contains("product_name"))
-                {
-                    var c = dataGridView2.Columns["product_name"];
-                    c.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
-                    c.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
-                }
-                foreach (DataGridViewColumn c in dataGridView2.Columns)
-                    if (c.Name != "product_name") c.FillWeight = Math.Max(60, c.FillWeight);
-
-                if (dataGridView2.Columns.Contains("LSX")) dataGridView2.Columns["LSX"].HeaderText = "LSX";
-                if (dataGridView2.Columns.Contains("RawDate")) dataGridView2.Columns["RawDate"].HeaderText = "Ngày KH";
-                if (dataGridView2.Columns.Contains("sequence")) dataGridView2.Columns["sequence"].HeaderText = "Thứ tự";
-                if (dataGridView2.Columns.Contains("product_name")) dataGridView2.Columns["product_name"].HeaderText = "Tên Sản Phẩm";
-                if (dataGridView2.Columns.Contains("product_code")) dataGridView2.Columns["product_code"].HeaderText = "Mã SP";
-                if (dataGridView2.Columns.Contains("production_qty")) dataGridView2.Columns["production_qty"].HeaderText = "Số lượng";
-                if (dataGridView2.Columns.Contains("order_name")) dataGridView2.Columns["order_name"].HeaderText = "Số ĐH";
-                if (dataGridView2.Columns.Contains("note")) dataGridView2.Columns["note"].HeaderText = "Ghi chú";
-                if (dataGridView2.Columns.Contains("time_needed")) dataGridView2.Columns["time_needed"].HeaderText = "Th.gian cần (h)";
-                if (dataGridView2.Columns.Contains("start_time")) dataGridView2.Columns["start_time"].HeaderText = "Giờ bắt đầu";
-                if (dataGridView2.Columns.Contains("finish_time")) dataGridView2.Columns["finish_time"].HeaderText = "Giờ kết thúc";
-                if (dataGridView2.Columns.Contains("desire"))
-                {
-                    dataGridView2.Columns["desire"].HeaderText = "Lịch nhận tuần";
-                    dataGridView2.Columns["desire"].DefaultCellStyle.Format = "dd/MM/yyyy";
-                }
-                if (dataGridView2.Columns.Contains("start_time"))
-                    dataGridView2.Columns["start_time"].DefaultCellStyle.Format = "dd/MM/yyyy HH:mm";
-                if (dataGridView2.Columns.Contains("finish_time"))
-                    dataGridView2.Columns["finish_time"].DefaultCellStyle.Format = "dd/MM/yyyy HH:mm";
-
-                foreach (DataGridViewColumn c in dataGridView2.Columns) c.ReadOnly = true;
-                if (dataGridView2.Columns.Contains("Date")) dataGridView2.Columns["Date"].ReadOnly = false;
-                if (dataGridView2.Columns.Contains("note")) dataGridView2.Columns["note"].ReadOnly = false;
-
-                foreach (DataGridViewRow row in dataGridView2.Rows) ApplyPlannedRowStyle(row);
-
-                // ALSO render into Excel-like UI
-                if (modetab == 3)
-                {
-                    DataTable dt3 = (DataTable)dataGridView2.DataSource;
-                    RenderTab3ToSheet(dt3);
-                }
-
-                RecomputeSequenceAndSort();
-                RecalculateSchedule(dt);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.ToString());
-            }
-        }
-
-
-
-        private void Default_Ka_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            _tab4DefaultKa = NormalizeKaKey((sender as ComboBox)?.SelectedItem?.ToString());
-        }
-
-        private void _tab4Table_ColumnChanged(object? sender, DataColumnChangeEventArgs e)
-        {
-            if (modetab != 4) return;
-            if (_tab4ApplyingKa) return;                 // avoid re-entrancy
-            if (e.Column.ColumnName == "ka" && e.Row?.Table != null)
-                RecalcRowTimes(e.Row);
-        }
-
-        private void KaEditingCombo_SelectedIndexChanged(object? sender, EventArgs e)
-        {
-            if (modetab != 4) return;
-            if (_tab4ApplyingKa) return; // guard
-            if (sender is not ComboBox cb) return;
-            if (dataGridView2.CurrentCell is not DataGridViewComboBoxCell) return;
-
-            _tab4ApplyingKa = true;
-            int rowIndex = dataGridView2.CurrentCell.RowIndex;
-
-            // Defer the update so the ComboBox finishes its own change first
-            BeginInvoke(new Action(() =>
-            {
-                try
-                {
-                    var drv = dataGridView2.Rows[rowIndex].DataBoundItem as DataRowView;
-                    if (drv != null)
-                    {
-                        var normalized = NormalizeKaKey(cb.SelectedItem?.ToString());
-                        drv["ka"] = normalized;              // write to data source once
-
-                        RecalcRowTimes(drv.Row);             // recompute times now
-                        ApplyTab4RowStyle(dataGridView2.Rows[rowIndex]);
-                    }
-
-                    dataGridView2.CommitEdit(DataGridViewDataErrorContexts.Commit);
-                    dataGridView2.EndEdit();
-                    dataGridView2.InvalidateRow(rowIndex);   // immediate repaint
-                }
-                finally
-                {
-                    _tab4ApplyingKa = false;
-                }
-            }));
-        }
-
-        private void ApplyTab4RowStyle(DataGridViewRow gridRow)
-        {
-            if (gridRow?.DataBoundItem is not DataRowView drv) return;
-
-            bool isSunday = drv.Row.Field<DateTime>("DateOnly").DayOfWeek == DayOfWeek.Sunday;
-            string ka = drv.Row.Field<string?>("ka") ?? "";
-            bool isNghi = NormalizeKaKey(ka) == "Nghỉ";
-
-            // Priority: Nghỉ > Sunday > normal
-            if (isNghi) gridRow.DefaultCellStyle.BackColor = Color.Gainsboro;
-            else if (isSunday) gridRow.DefaultCellStyle.BackColor = Color.Gainsboro;
-            else gridRow.DefaultCellStyle.BackColor = SystemColors.Window;
-        }
-
-        void ClearGrid(DataGridView grid, bool removeColumns = false)
-        {
-            grid.SuspendLayout();
-            try
-            {
-                if (grid.DataSource is DataView dv && dv.Table != null) dv.Table.Clear();
-                else if (grid.DataSource is DataTable dt) dt.Clear();
-                else if (grid.DataSource is BindingSource bs)
-                {
-                    if (bs.List is DataView v && v.Table != null) v.Table.Clear();
-                    else if (bs.List is DataTable t) t.Clear();
-                    else bs.Clear();
-                }
-                else if (grid.DataSource != null) grid.DataSource = null;
-                else grid.Rows.Clear();
-
-                if (removeColumns) grid.Columns.Clear();
-                grid.ClearSelection();
-            }
-            finally { grid.ResumeLayout(); }
-        }
-
-        // NEW: fetch sogio_can per LSX + step (workorder_name)
-        public static Dictionary<(string Lsx, string Step), double> LoadStepTimePerLsxAndStep(IEnumerable<(string Lsx, string Step)> keys)
-        {
-            var wanted = keys
-                .Where(k => !string.IsNullOrWhiteSpace(k.Lsx) && !string.IsNullOrWhiteSpace(k.Step))
-                .Distinct()
-                .ToList();
-
-            var result = new Dictionary<(string, string), double>(
-                new ValueTupleComparer<string, string>(StringComparer.OrdinalIgnoreCase, StringComparer.OrdinalIgnoreCase));
-
-            if (wanted.Count == 0) return result;
-
-            var lsxArr = wanted.Select(k => k.Lsx.Trim()).Distinct().ToArray();
-
-            using var conn = new NpgsqlConnection(SQL.PostGreSQLConnectionString);
-            conn.Open();
-            const string sql = @"
-        SELECT mp.sophieu AS lsx,
-               COALESCE(NULLIF(wo.routing_equip_name,''),'Thành Phẩm') AS workorder_name,
-               COALESCE(wo.sogio_can, 0) AS sogio_can
-        FROM mrp_workorder wo
-        JOIN mrp_production mp ON mp.id = wo.production_id
-        WHERE mp.sophieu = ANY(@lsx);";
-            using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.Add("@lsx", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text).Value = lsxArr;
-
-            using var rd = cmd.ExecuteReader();
-            while (rd.Read())
-            {
-                var lsx = (rd["lsx"]?.ToString() ?? "").Trim();
-                var step = (rd["workorder_name"]?.ToString() ?? "Thành Phẩm").Trim();
-                var hours = Convert.ToDouble(rd["sogio_can"] ?? 0d);
-                result[(lsx, step)] = hours;
-            }
-
-            // keep only the pairs the grid actually shows (defensive)
-            var filtered = new Dictionary<(string, string), double>(
-                new ValueTupleComparer<string, string>(StringComparer.OrdinalIgnoreCase, StringComparer.OrdinalIgnoreCase));
-            foreach (var p in wanted)
-                if (result.TryGetValue((p.Lsx.Trim(), p.Step.Trim()), out var h)) filtered[(p.Lsx.Trim(), p.Step.Trim())] = h;
-
-            return filtered;
-        }
-
-        // helper to get case-insensitive tuple keys
-        private sealed class ValueTupleComparer<T1, T2> : IEqualityComparer<(T1, T2)>
-        {
-            private readonly IEqualityComparer<T1> _c1;
-            private readonly IEqualityComparer<T2> _c2;
-            public ValueTupleComparer(IEqualityComparer<T1> c1, IEqualityComparer<T2> c2) { _c1 = c1; _c2 = c2; }
-            public bool Equals((T1, T2) x, (T1, T2) y) => _c1.Equals(x.Item1, y.Item1) && _c2.Equals(x.Item2, y.Item2);
-            public int GetHashCode((T1, T2) obj) => HashCode.Combine(_c1.GetHashCode(obj.Item1), _c2.GetHashCode(obj.Item2));
-        }
-
-
-        private void dataGridView2_CurrentCellDirtyStateChanged_Tab4Commit(object? sender, EventArgs e)
-        {
-            if (modetab == 4 && dataGridView2.IsCurrentCellDirty)
-                dataGridView2.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        }
-
-        private void dataGridView2_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
-        {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-
-            var colName = dataGridView2.Columns[e.ColumnIndex].Name;
-            if (colName != "machine") return;
-
-            var cell = dataGridView2.Rows[e.RowIndex].Cells[e.ColumnIndex];
-            var raw = cell.Value?.ToString()?.Trim();
-
-            if (string.IsNullOrEmpty(raw)) return;
-
-            if (!int.TryParse(raw, out int index) || index <= 0)
-            {
-                // Not a positive integer → leave as user entered
-                return;
-            }
-
-            // Prefer the DateSorter-selected category
-            string? orderKey = currentOrderKeyForTab2;
-
-            // If none selected or not mappable, infer from workorder_name
-            if (string.IsNullOrEmpty(orderKey))
-            {
-                var woName = dataGridView2.Rows[e.RowIndex].Cells["workorder_name"]?.Value?.ToString();
-                orderKey = InferOrderKeyFromWorkorderName(woName);
-            }
-
-            // If still no key, do nothing (keep the number)
-            if (string.IsNullOrEmpty(orderKey))
-                return;
-
-            // Map the number to a machine name using OrderMap
-            string mapped = WorkorderService.OrderMap(orderKey, index);
-
-            // Write back mapped name
-            cell.Value = mapped;
-        }
-
-        private void dataGridView2_EditingControlShowing(object? sender, DataGridViewEditingControlShowingEventArgs e)
-        {
-            if (dataGridView2.CurrentCell == null) return;
-            var colName = dataGridView2.Columns[dataGridView2.CurrentCell.ColumnIndex].Name;
-
-            if (e.Control is TextBox tb)
-            {
-                // clear old
-                tb.KeyPress -= MachineCell_KeyPress;
-                tb.KeyPress -= Sequence_KeyPress;
-
-                if (colName == "machine") tb.KeyPress += MachineCell_KeyPress; // your Tab-2 mapping (digits only)
-                if (colName == "sequence") tb.KeyPress += Sequence_KeyPress;    // Tab-3: digits only
-            }
-        }
-
-        private void dataGridView2_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
-        {
-            if (dataGridView2.IsCurrentCellDirty)
-                dataGridView2.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        }
-
-        private void dataGridView2_DataBindingComplete(object? sender, DataGridViewBindingCompleteEventArgs e)
-        {
-            if (modetab != 3) return;
-            foreach (DataGridViewRow row in dataGridView2.Rows) ApplyPlannedRowStyle(row);
-        }
-
-        private void dataGridView2_CellContentClick(object sender, DataGridViewCellEventArgs e)
-        {
-        }
-
-        private void dataGridView2_RowPrePaint_Tab4(object? sender, DataGridViewRowPrePaintEventArgs e)
-        {
-            if (modetab != 4 || e.RowIndex < 0) return;
-            ApplyTab4RowStyle(dataGridView2.Rows[e.RowIndex]);
-        }
-
-        private void dataGridView2_EditingControlShowing_Tab4(object? sender, DataGridViewEditingControlShowingEventArgs e)
-        {
-            if (modetab != 4) return;
-
-            if (_tab4KaEditingCombo != null)
-                _tab4KaEditingCombo.SelectedIndexChanged -= KaEditingCombo_SelectedIndexChanged;
-
-            if (dataGridView2.CurrentCell is DataGridViewComboBoxCell &&
-                dataGridView2.Columns[dataGridView2.CurrentCell.ColumnIndex].Name == "ka" &&
-                e.Control is ComboBox combo)
-            {
-                _tab4KaEditingCombo = combo;
-                _tab4KaEditingCombo.DropDownStyle = ComboBoxStyle.DropDownList; // important
-                _tab4KaEditingCombo.SelectedIndexChanged += KaEditingCombo_SelectedIndexChanged;
-            }
-        }
-
-        private void dataGridView2_CellValueChanged_Tab4(object? sender, DataGridViewCellEventArgs e)
-        {
-            if (modetab != 4 || e.RowIndex < 0 || e.ColumnIndex < 0) return;
-            if (dataGridView2.Columns[e.ColumnIndex].Name == "ka")
-            {
-                var drv = dataGridView2.Rows[e.RowIndex].DataBoundItem as DataRowView;
-                if (drv != null) RecalcRowTimes(drv.Row);
-                ApplyTab4RowStyle(dataGridView2.Rows[e.RowIndex]);
-                dataGridView2.InvalidateRow(e.RowIndex);
-            }
-        }
-
-        private void dataGridView2_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
-        {
-            if (modetab != 3 || e.RowIndex < 0 || e.ColumnIndex < 0) return;
-
-            var col = dataGridView2.Columns[e.ColumnIndex].Name;
-            var dv = dataGridView2.Rows[e.RowIndex].DataBoundItem as DataRowView;
-            if (dv == null) return;
-            var row = dv.Row;
-
-            if (col == "Date")
-            {
-                bool planned = row.Field<bool?>("Date") == true;
-                var dt = (DataTable)dataGridView2.DataSource;
-
-                if (planned)
-                {
-                    if (row["RawDate"] == DBNull.Value || ((DateTime)row["RawDate"]).Date < _tab3StartDate)
-                        row["RawDate"] = _tab3StartDate;
-
-                    if (string.IsNullOrWhiteSpace(row["ka"]?.ToString()))
-                    {
-                        var baseDay = (row["RawDate"] != DBNull.Value ? ((DateTime)row["RawDate"]).Date : _tab3StartDate);
-                        var one = SQL.LoadShiftDays(_tab3MachineId ?? "", baseDay, baseDay);
-                        if (one.TryGetValue(baseDay, out var v) && !string.IsNullOrWhiteSpace(v.Shift))
-                            row["ka"] = NormalizeKaKey(v.Shift);
-                        else
-                            row["ka"] = DefaultShiftName;
-                    }
-
-                    row["plan_order"] = NextPlanOrder(dt);
-
-                    row["start_time"] = DBNull.Value;
-                    row["finish_time"] = DBNull.Value;
-                }
-                else
-                {
-                    row["sequence"] = DBNull.Value;
-                    row["RawDate"] = DBNull.Value;
-                    row["start_time"] = DBNull.Value;
-                    row["finish_time"] = DBNull.Value;
-                    row["plan_order"] = DBNull.Value;
-
-                    CompactPlanOrder(dt);
-                }
-
-                ApplyPlannedRowStyle(dataGridView2.Rows[e.RowIndex]);
-
-                RecalculateSchedule(dt);
-                RecomputeSequenceAndSort();
-                return;
-            }
-
-
-
-        }
+        private void searcher_SelectedIndexChanged(object sender, EventArgs e) => textBox1_TextChanged(sender, e);
+        private void textBox1_TextChanged(object sender, EventArgs e) { }
+        private void dataGridView2_CellContentClick(object sender, DataGridViewCellEventArgs e) { }
 
         private void tab1_Click(object sender, EventArgs e)
         {
-            ClearGrid(dataGridView2, removeColumns: true);
-            textBox1.Clear();
+            dataGridView2.SuspendLayout();
+            try
+            {
+                if (dataGridView2.DataSource is DataView dv && dv.Table != null) dv.Table.Clear();
+                dataGridView2.Columns.Clear();
+            }
+            finally { dataGridView2.ResumeLayout(); }
+
+            MarkActiveTab(tab1);
             modetab = 1;
+            textBox1.Clear();
             label1.Text = "Lịch nhận tuần";
             button1.Visible = true;
             Default_Ka.Visible = false;
             ShowEmpty.Text = "Hiển thị LSX trống";
             chkCopyToAll.Visible = true;
             chkCopyToAll.Text = "Copy vào Số ĐH tương tự";
-            allWorkorders = WorkorderService.LoadPendingWorkorders(dataGridView1, dataGridView2, ShowEmpty, ShowOld, DateSorter, modetab);
+
+            allWorkorders = WorkorderService.LoadPendingWorkorders(
+                dataGridView1, dataGridView2, ShowEmpty, ShowOld, DateSorter, modetab);
             RefreshSearcherItems();
+            LayoutGridsUnderHeader();
         }
 
-        private void tab2_Click(object sender, EventArgs e)
+        // Highlight the active tab button and reset the rest
+        private void MarkActiveTab(Button active)
         {
-            ClearGrid(dataGridView2, removeColumns: true);
-            modetab = 2;
-            textBox1.Clear();
-            label1.Text = "KHSX theo công đoạn";
-            Default_Ka.Visible = false;
-            button1.Visible = true;
-            chkCopyToAll.Visible = false;
-            ShowEmpty.Text = "Hiển thị LSX chưa có kế hoạch";
-            allWorkorders = WorkorderService.LoadPendingWorkorders(dataGridView1, dataGridView2, ShowEmpty, ShowOld, DateSorter, modetab);
-
-            // user will type quickly into the machine column
-            dataGridView2.EditMode = DataGridViewEditMode.EditOnEnter;
-
-            // Sort any way you like; this is harmless for mapping logic
-            if (dataGridView2.DataSource is DataView dv)
-                dv.Sort = "workorder_name ASC";
-
-            // (Re)populate categories for the number→name mapping
-            From.Visible = false;
-            To.Visible = false;
-            DateSorter.Items.Clear();
-
-            var categorizedCounts = new Dictionary<string, int>();
-            var uncategorizedCounts = new Dictionary<string, int>();
-            foreach (var row in allWorkorders.AsEnumerable())
+            if (_tabButtons != null)
             {
-                string? name = row.Field<string?>("workorder_name");
-                if (string.IsNullOrWhiteSpace(name)) continue;
-
-                bool matched = false;
-                foreach (var category in categoryKeywords)
+                foreach (var b in _tabButtons)
                 {
-                    if (category.Value.Any(k => name.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0))
-                    {
-                        if (!categorizedCounts.ContainsKey(category.Key)) categorizedCounts[category.Key] = 0;
-                        categorizedCounts[category.Key]++; matched = true; break;
-                    }
-                }
-                if (!matched)
-                {
-                    if (!uncategorizedCounts.ContainsKey(name)) uncategorizedCounts[name] = 0;
-                    uncategorizedCounts[name]++;
+                    if (b == null || b.IsDisposed) continue;
+                    b.BackColor = _tabGreen;
+                    b.ForeColor = Color.White;
+                    b.FlatStyle = FlatStyle.Flat;
+                    b.FlatAppearance.BorderSize = 0;
+                    b.UseVisualStyleBackColor = false;
                 }
             }
-            foreach (var kv in categorizedCounts.OrderByDescending(c => c.Value))
-                DateSorter.Items.Add($"{kv.Key} ({kv.Value})");
-            foreach (var kv in uncategorizedCounts.OrderByDescending(c => c.Value))
-                DateSorter.Items.Add($"{kv.Key} ({kv.Value})");
 
-            DateSorter.SelectedIndex = 0;
-            DateSorter.Text = DateSorter.SelectedText;
-            currentOrderKeyForTab2 = null;
-
-
-            dataGridView2.EditingControlShowing -= dataGridView2_EditingControlShowing;
-            dataGridView2.EditingControlShowing += dataGridView2_EditingControlShowing;
-            dataGridView2.CellEndEdit -= dataGridView2_CellEndEdit;
-            dataGridView2.CellEndEdit += dataGridView2_CellEndEdit;
-            RefreshSearcherItems();
-        }
-
-        private void tab3_Click(object sender, EventArgs e)
-        {
-            ClearGrid(dataGridView2, removeColumns: true);
-            modetab = 3;
-            textBox1.Clear();
-            label1.Text = "KHSX máy";
-            Default_Ka.Visible = false;
-            button1.Visible = false;
-            chkCopyToAll.Visible = false;
-            From.Visible = true;
-            To.Visible = false;
-
-            EnsureTab3Grid();
-            _tab3Grid.Visible = true;
-            dataGridView2.Visible = false;
-
-            DateSorter.Visible = true;
-            DateSorter.Items.Clear();
-            foreach (var m in SQL.LoadMachineListForPlan()) DateSorter.Items.Add(m);
-            if (DateSorter.Items.Count > 0)
+            if (active != null && !active.IsDisposed)
             {
-                DateSorter.SelectedIndex = 0;
-                _tab3MachineId = DateSorter.SelectedItem.ToString();
+                active.FlatStyle = FlatStyle.Flat;
+                active.FlatAppearance.BorderSize = 0;
+                active.UseVisualStyleBackColor = false;
+                active.BackColor = _tabGreenActive;
+                active.ForeColor = Color.White;
+
+                if (_tabButtons != null && !_tabButtons.Contains(active))
+                    _tabButtons.Add(active);
             }
-
-            _tab3StartDate = From.Value.Date;
-
-            // original event hooks stay
-            dataGridView2.CurrentCellDirtyStateChanged -= dataGridView2_CurrentCellDirtyStateChanged;
-            dataGridView2.CurrentCellDirtyStateChanged += dataGridView2_CurrentCellDirtyStateChanged;
-            dataGridView2.CellValueChanged -= dataGridView2_CellValueChanged;
-            dataGridView2.CellValueChanged += dataGridView2_CellValueChanged;
-            dataGridView2.DataBindingComplete -= dataGridView2_DataBindingComplete;
-            dataGridView2.DataBindingComplete += dataGridView2_DataBindingComplete;
-
-            LoadTab3PlanGrid();     // ← builds DataTable and calls RenderTab3ToSheet(dt)
-            RefreshSearcherItems();
         }
 
-
-        private void tab4_Click(object sender, EventArgs e)
-        {
-            modetab = 4;
-            ClearGrid(dataGridView2, removeColumns: true);
-            label1.Text = "Ka làm việc";
-            textBox1.Clear();
-            button1.Visible = false;
-            Default_Ka.Visible = true;
-            chkCopyToAll.Visible = true;
-            chkCopyToAll.Text = "Áp Dụng";
-            LoadTab4PlanGrid();
-            RefreshSearcherItems();
-        }
-
-        private void searcher_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            // Re-run the search with the new column
-            textBox1_TextChanged(sender, e);
-        }
+        private void tab2_Click(object sender, EventArgs e) { }
+        private void tab3_Click(object sender, EventArgs e) { }
+        private void tab4_Click(object sender, EventArgs e) { }
+        private void tab5_Click(object sender, EventArgs e) { MarkActiveTab(tab5); }
     }
 }

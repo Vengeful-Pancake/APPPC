@@ -172,12 +172,12 @@ namespace APPPC
 
                 // Create a list to hold filtered users
 
-                if (int.Parse(matchedUser.Quyenhan) == 4)
+                if (int.Parse(matchedUser.Quyenhan) >= 4 && int.Parse(matchedUser.Quyenhan) < 7)
                 {
                     // Add users from the same NH
                     Session.User_s = users.Where(u => u.Nhom == mainmatchedUser.Nhom).ToList();
                 }
-                else if (int.Parse(matchedUser.Quyenhan) > 5)
+                else if (int.Parse(matchedUser.Quyenhan) > 6)
                 {
                     // Add all users
                     Session.User_s = Control.SQL.GetUsers();
@@ -187,7 +187,6 @@ namespace APPPC
                     // Add only the current user
                     Session.User_s = users.Where(u => u.Msnv == matchedUser.Msnv).ToList();
                 }
-
 
                 // Proceed to main form
                 var mainmenu = new MainMenuForm();

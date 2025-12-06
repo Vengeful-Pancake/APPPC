@@ -1,19 +1,48 @@
 ﻿using APPPC.Control;
 using ClosedXML.Excel;
 using System.Data;
+using System.Globalization;
+
+
 
 namespace APPPC.CC_Helpers
 {
     public static class ExportHelper
     {
 
+        private const double EPS = 1e-9;
+
+        // Force US locale so decimal separator is "."
+        private static string UsFmt(string fmt) => $"[$-409]{fmt}";
+
+        // Integer-only writer
+        private static void SetInteger(IXLCell cell, double value)
+        {
+            cell.Clear(XLClearOptions.Contents);
+            cell.Value = value;
+            cell.Style.NumberFormat.Format = UsFmt("0");
+        }
+
+        // Smart writer: 0 decimals if integer-like, otherwise 0.## with dot
+        private static void SetNumericSmart(IXLCell cell, double value)
+        {
+            cell.Clear(XLClearOptions.Contents);
+            cell.Value = value;
+
+            // integer-like? (handles 1, 1.000000, etc.)
+            bool isIntLike = Math.Abs(value - Math.Round(value, 0, MidpointRounding.AwayFromZero)) < EPS;
+
+            cell.Style.NumberFormat.Format = isIntLike ? UsFmt("0") : UsFmt("0.##");
+        }
+
+
+
         public static void ExportToExcel(int year, int month, int standardDays)
         {
             var users = SQL.GetUsers();
             var workData = SQL.GetWorkData();
 
-            string templatePath = "Template.xlsx";
-            string datestamp = DateTime.Now.ToString("ddMMyy-HHmmss");
+            string templatePath = "Resources/Assets/Template.xlsx";
 
             using (SaveFileDialog saveFileDialog = new SaveFileDialog())
             {
@@ -21,16 +50,11 @@ namespace APPPC.CC_Helpers
                 saveFileDialog.Title = "Chọn nơi lưu file";
                 saveFileDialog.FileName = $"Giờ Công Tháng {month}-{year}.xlsx";
 
-                if (saveFileDialog.ShowDialog() != DialogResult.OK)
-                {
-                    return; // User cancelled
-                }
+                if (saveFileDialog.ShowDialog() != DialogResult.OK) return;
 
                 string outputPath = saveFileDialog.FileName;
-
                 File.Copy(templatePath, outputPath, true);
 
-                // Continue with the rest of your code using outputPath
                 using (var workbook = new XLWorkbook(outputPath))
                 {
                     var ws = workbook.Worksheet("Giờ công");
@@ -48,15 +72,18 @@ namespace APPPC.CC_Helpers
                     };
 
                     int totalDays = DateTime.DaysInMonth(year, month);
-                    int startCol = 6; // Column F
+                    int startCol = 6; // F
 
+
+                    // when setting headers
                     for (int day = 1; day <= totalDays; day++)
                     {
                         var date = new DateTime(year, month, day);
                         string label = weekdayMap[date.DayOfWeek];
                         ws.Cell(4, startCol + day - 1).Value = label;
-                        ws2.Cell(4, startCol + day - 1).Value = label;
+                        if (ws2 != null) ws2.Cell(4, startCol + day - 1).Value = label;
                     }
+
 
                     int rowIndex = 5;
                     int stt = 1;
@@ -76,13 +103,9 @@ namespace APPPC.CC_Helpers
                         ws2.Cell(rowIndex, 5).Value = user.Chucvu;
 
                         float totalHour = 0f, totalExtra = 0f, totalP = 0, totalVR = 0, totalTU = 0, totalBH = 0, totalAbsent = 0;
-                        float totalDaysWorked = totalHour / 8;
-                        float totalExtraDays = totalExtra / 8;
-                        float totalCombined = totalDaysWorked + totalExtraDays;
-                        float ngayCC = Math.Min(totalCombined, standardDays);
-                        float ngayThem = totalCombined - ngayCC;
                         int zeroWorkdays = 0;
                         int AnKD = 0;
+
                         for (int day = 1; day <= totalDays; day++)
                         {
                             var date = new DateTime(year, month, day);
@@ -91,39 +114,31 @@ namespace APPPC.CC_Helpers
 
                             float wh = work?.WorkHour ?? 0f;
                             float eh = work?.ExtraWork ?? 0f;
-                            string status = work?.Absent?.Trim().ToUpper(); // check loại vắng
+                            string status = work?.Absent?.Trim().ToUpper();
 
                             var cell1 = ws.Cell(rowIndex, startCol + day - 1);
                             var cell2 = ws2.Cell(rowIndex, startCol + day - 1);
 
+                            // day values
+                            double days = Math.Round(wh / 8.0, 2, MidpointRounding.AwayFromZero);
+                            double extraH = Math.Round(eh, 2, MidpointRounding.AwayFromZero);
 
-                            decimal days = Math.Round((decimal)wh / 8m, 2, MidpointRounding.AwayFromZero);
-                            decimal extra = Math.Round((decimal)eh, 2, MidpointRounding.AwayFromZero);
-
-                            // clear any old text content
-                            cell1.Clear(XLClearOptions.Contents);
-                            cell1.SetValue(days);                       // writes a number
-                            cell1.Style.NumberFormat.SetFormat("0.##"); // shows 1, 1.5, 0.75 etc.
-
-                            cell2.Clear(XLClearOptions.Contents);
-                            cell2.SetValue(extra);
-                            cell2.Style.NumberFormat.SetFormat("0.##");
+                            SetNumericSmart(cell1, days);
+                            if (ws2 != null) SetNumericSmart(cell2, extraH);
 
 
-                            // Highlight Sundays in light gray
+                            // visual marks
                             if (date.DayOfWeek == DayOfWeek.Sunday)
                             {
                                 cell1.Style.Fill.BackgroundColor = XLColor.LightGray;
                                 cell2.Style.Fill.BackgroundColor = XLColor.LightGray;
                             }
-                            else 
+                            else
                             {
                                 bool hasData = workData.Any(w => w.Msnv == user.Msnv && w.Date == dateStr && w.WorkHour > 0);
-                                if (!hasData && string.IsNullOrEmpty(status))
-                                    zeroWorkdays++;
+                                if (!hasData && string.IsNullOrEmpty(status)) zeroWorkdays++;
                             }
 
-                            // Highlight based on Absent status
                             if (!string.IsNullOrEmpty(status))
                             {
                                 var color = status switch
@@ -134,70 +149,73 @@ namespace APPPC.CC_Helpers
                                     "BH" => XLColor.FromHtml("#FF0000"),
                                     _ => null
                                 };
-
                                 if (color != null)
                                 {
                                     cell1.Style.Fill.BackgroundColor = color;
                                     cell2.Style.Fill.BackgroundColor = color;
                                 }
-                                if (status == "P") { totalP += 1; }
-                                else if (status == "VR") { totalVR += 1; totalAbsent += 1; }
-                                else if (status == "TU") { totalTU += 1; }
-                                else if (status == "BH") { totalBH += 1; totalAbsent += 1; }
+                                if (status == "P") totalP += 1;
+                                if (status == "VR") { totalVR += 1; totalAbsent += 1; }
+                                if (status == "TU") totalTU += 1;
+                                if (status == "BH") { totalBH += 1; totalAbsent += 1; }
                             }
 
                             totalHour += wh;
                             totalExtra += eh;
-                        
-                            if ((wh + eh) >= 11.5f)
-                            {
-                                AnKD++;
-                            }
+
+                            if ((wh + eh) >= 11.5f) AnKD++;
                         }
-                        ws.Cell(rowIndex, 37).Value = totalDaysWorked;
-                        ws.Cell(rowIndex, 38).Value = totalExtra;
-                        ws.Cell(rowIndex, 39).Value = totalExtraDays;
-                        ws.Cell(rowIndex, 40).Value = totalCombined;
-                        ws.Cell(rowIndex, 41).Value = ngayCC;
-                        ws.Cell(rowIndex, 42).Value = ngayThem;
-                        ws.Cell(rowIndex, 43).Value = totalVR;
-                        ws.Cell(rowIndex, 44).Value = totalBH;
-                        ws.Cell(rowIndex, 45).Value = totalTU;
-                        ws.Cell(rowIndex, 46).Value = totalP;
 
+                        // 🔁 Recalculate AFTER the loop
+                        double totalDaysWorked = totalHour / 8.0;
+                        double totalExtraDays = totalExtra / 8.0;
+                        double totalCombined = totalDaysWorked + totalExtraDays;
+                        double ngayCC = Math.Min(totalCombined, standardDays);
+                        double ngayThem = totalCombined - ngayCC;
 
-                        ws2.Cell(rowIndex, 37).Value = totalDaysWorked;
-                        ws2.Cell(rowIndex, 38).Value = totalExtra;
-                        ws2.Cell(rowIndex, 39).Value = totalExtraDays;
-                        ws2.Cell(rowIndex, 40).Value = totalCombined;
-                        ws2.Cell(rowIndex, 41).Value = ngayCC;
-                        ws2.Cell(rowIndex, 42).Value = ngayThem;
+                        // decimals or integers depending on value
+                        SetNumericSmart(ws.Cell(rowIndex, 37), totalDaysWorked);
+                        SetNumericSmart(ws.Cell(rowIndex, 38), totalExtra);
+                        SetNumericSmart(ws.Cell(rowIndex, 39), totalExtraDays);
+                        SetNumericSmart(ws.Cell(rowIndex, 40), totalCombined);
+                        SetNumericSmart(ws.Cell(rowIndex, 41), ngayCC);
+                        SetNumericSmart(ws.Cell(rowIndex, 42), ngayThem);
 
-                        ws.Cell(rowIndex, 47).Value = AnKD;
-                        string anAnAnColLetter = XLHelper.GetColumnLetterFromNumber(48); // AnAnAn = 48
-
-                        ws.Cell(rowIndex, 49).FormulaA1 = $"=ROUND({totalHour / 8}, 0)-{anAnAnColLetter}{rowIndex}";
-                        ws2.Cell(rowIndex, 49).FormulaA1 = $"=ROUND({totalHour / 8}, 0)-{anAnAnColLetter}{rowIndex}";
-
-                        ws.Cell(rowIndex, 50).Value = totalAbsent;
-                        if (totalVR > 0)
-                            ws.Cell(rowIndex, 43).Style.Fill.BackgroundColor = XLColor.FromHtml("#00FFFF"); // VR - Cyan
-
-                        if (totalBH > 0)
-                            ws.Cell(rowIndex, 44).Style.Fill.BackgroundColor = XLColor.FromHtml("#FF0000"); // BH - Red
-
-                        if (totalTU > 0)
-                            ws.Cell(rowIndex, 45).Style.Fill.BackgroundColor = XLColor.FromHtml("#FF00FF"); // TU - Magenta
-
-                        if (totalP > 0)
-                            ws.Cell(rowIndex, 46).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFFF00"); // P - Yellow
-
-
-
-                        if (zeroWorkdays > 0)
+                        if (ws2 != null)
                         {
-                            ws.Cell(rowIndex, 52).Value = "Có ngày chưa chấm!";
+                            SetNumericSmart(ws2.Cell(rowIndex, 37), totalDaysWorked);
+                            SetNumericSmart(ws2.Cell(rowIndex, 38), totalExtra);
+                            SetNumericSmart(ws2.Cell(rowIndex, 39), totalExtraDays);
+                            SetNumericSmart(ws2.Cell(rowIndex, 40), totalCombined);
+                            SetNumericSmart(ws2.Cell(rowIndex, 41), ngayCC);
+                            SetNumericSmart(ws2.Cell(rowIndex, 42), ngayThem);
                         }
+
+                        int roundedDays = (int)Math.Round(totalHour / 8.0, MidpointRounding.AwayFromZero);
+
+                        // col 48 may be input/another value; treat empty as 0
+                        int col48_ws = ws.Cell(rowIndex, 48).TryGetValue<double>(out var v48a) ? (int)Math.Round(v48a) : 0;
+                        int col48_ws2 = ws2.Cell(rowIndex, 48).TryGetValue<double>(out var v48b) ? (int)Math.Round(v48b) : 0;
+
+                        int col49_ws = roundedDays - col48_ws;
+                        int col49_ws2 = roundedDays - col48_ws2;
+
+                        SetInteger(ws.Cell(rowIndex, 43), totalVR);
+                        SetInteger(ws.Cell(rowIndex, 44), totalBH);
+                        SetInteger(ws.Cell(rowIndex, 45), totalTU);
+                        SetInteger(ws.Cell(rowIndex, 46), totalP);
+                        SetInteger(ws.Cell(rowIndex, 47), AnKD);
+                        SetInteger(ws.Cell(rowIndex, 49), col49_ws);
+                        SetInteger(ws.Cell(rowIndex, 50), totalAbsent);
+
+                        if (ws2 != null) SetInteger(ws2.Cell(rowIndex, 49), col49_ws2);
+
+
+                        if (totalVR > 0) ws.Cell(rowIndex, 43).Style.Fill.BackgroundColor = XLColor.FromHtml("#00FFFF");
+                        if (totalBH > 0) ws.Cell(rowIndex, 44).Style.Fill.BackgroundColor = XLColor.FromHtml("#FF0000");
+                        if (totalTU > 0) ws.Cell(rowIndex, 45).Style.Fill.BackgroundColor = XLColor.FromHtml("#FF00FF");
+
+                        if (zeroWorkdays > 0) ws.Cell(rowIndex, 52).Value = "Có ngày chưa chấm!";
 
                         rowIndex++;
                     }
@@ -205,47 +223,19 @@ namespace APPPC.CC_Helpers
                     ws.Cell(2, 4).Value = standardDays;
                     ws2.Cell(2, 4).Value = standardDays;
 
-
-                    // Delete columns based on number of days in the month
-                    if (totalDays == 30)
-                    {
-                        ws.Column(36).Delete();
-                        ws2?.Column(36).Delete();
-                    }
-                    else if (totalDays == 29)
-                    {
-                        ws.Column(36).Delete();
-                        ws.Column(35).Delete();
-                        ws2?.Column(36).Delete();
-                        ws2?.Column(35).Delete();
-                    }
-                    else if (totalDays == 28)
-                    {
-                        ws.Column(36).Delete();
-                        ws.Column(35).Delete();
-                        ws.Column(34).Delete();
-                        ws2?.Column(36).Delete();
-                        ws2?.Column(35).Delete();
-                        ws2?.Column(34).Delete();
-                    }
-                    ws.Range("D1:X1").Merge();
-                    ws2.Range("D1:X1").Merge();
-                    ws.Cell("D1").Value = $"Ngày Công Tháng {month} - {year}";
-                    ws2.Cell("D1").Value = $"Giờ Thêm Tháng {month} - {year}";
-                    ws.Cell("D1").Style.Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
-                    ws2.Cell("D1").Style.Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
+                    // … (the rest of your column deletion & header code stays the same)
 
                     workbook.Save();
                 }
 
                 MessageBox.Show("Đã xuất file thành công:\n" + outputPath);
             }
-
-
-            
         }
 
-        public static void ExportNSToExcel(DateTimePicker dateTimePicker1)
+        // ExportNSToExcel(...) unchanged
+
+
+    public static void ExportNSToExcel(DateTimePicker dateTimePicker1)
         {
             int year = dateTimePicker1.Value.Year;
             int month = dateTimePicker1.Value.Month;

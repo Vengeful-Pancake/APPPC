@@ -153,10 +153,11 @@ namespace APPPC.Control
                             cmd.Parameters.Add("@n", SqlDbType.NVarChar, 255).Value =
                                 string.IsNullOrWhiteSpace(note) ? (object)DBNull.Value : note;
                             cmd.Parameters.Add("@m", SqlDbType.NChar, 32).Value = mach.Trim();
+
                             total += cmd.ExecuteNonQuery();
                         }
                     }
-                    tx.Commit();
+                    tx.Commit(); 
                 }
             }
             return total;
@@ -189,9 +190,9 @@ namespace APPPC.Control
                         bool nghiViec = !reader.IsDBNull(8) && reader.GetBoolean(8);
 
                         if (!nghiViec)
-                        {
+                        { 
                             users.Add(new User(
-                                reader.GetInt32(0).ToString(),      // MSNV
+                                reader.GetInt32(0).ToString(),      // MSNVa
                                 reader.GetString(1),                // HoTen
                                 reader.GetString(2),                // ChucVu
                                 reader.GetByte(3).ToString(),       // QuyenHan
@@ -235,7 +236,7 @@ namespace APPPC.Control
                     }
                 }
             }
-            return users;
+            return users;  
         }
 
         public static List<Work> GetWorkData()
