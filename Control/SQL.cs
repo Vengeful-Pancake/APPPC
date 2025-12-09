@@ -58,19 +58,7 @@ namespace APPPC.Control
     public class SQL
     {
 
-#if DEBUG
 
-        public static string PostGreSQLConnectionString = "Host=192.168.1.12;Port=5432;Username=odoo;Password=2c-*kw?SG*fXv3pX;Database=QLSX3";
-#else
-        
-        public static string PostGreSQLConnectionString = "Host=192.168.1.12;Port=5432;Username=odoo-read;Password=lbgUfH,f6#-SkA#;Database=QLSX3";
-#endif
-        public static string GetConnectionString()
-        {
-
-            return "Server=192.168.1.12,1376;Database=chamcong;User Id=chamcong_app1;Password=Cevr9sKBBRRXnbZ;TrustServerCertificate=True;";
-
-        }
 
 
         public class WorkSummary

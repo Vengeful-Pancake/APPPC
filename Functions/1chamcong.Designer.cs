@@ -33,6 +33,15 @@
             DataGridViewCellStyle dataGridViewCellStyle3 = new DataGridViewCellStyle();
             DataGridViewCellStyle dataGridViewCellStyle4 = new DataGridViewCellStyle();
             dataGridView1 = new DataGridView();
+            STT = new DataGridViewTextBoxColumn();
+            MSNV = new DataGridViewTextBoxColumn();
+            HoTen = new DataGridViewTextBoxColumn();
+            Date = new DataGridViewTextBoxColumn();
+            WorkHour = new DataGridViewTextBoxColumn();
+            ExtraHour = new DataGridViewTextBoxColumn();
+            Absent = new DataGridViewComboBoxColumn();
+            ToNhom = new DataGridViewTextBoxColumn();
+            Note = new DataGridViewTextBoxColumn();
             tab1 = new Button();
             label1 = new Label();
             tab2 = new Button();
@@ -55,15 +64,6 @@
             btnExport = new Button();
             btnSave = new Button();
             btnExportNS = new Button();
-            STT = new DataGridViewTextBoxColumn();
-            MSNV = new DataGridViewTextBoxColumn();
-            HoTen = new DataGridViewTextBoxColumn();
-            Date = new DataGridViewTextBoxColumn();
-            WorkHour = new DataGridViewTextBoxColumn();
-            ExtraHour = new DataGridViewTextBoxColumn();
-            Absent = new DataGridViewComboBoxColumn();
-            ToNhom = new DataGridViewTextBoxColumn();
-            Note = new DataGridViewTextBoxColumn();
             ((System.ComponentModel.ISupportInitialize)dataGridView1).BeginInit();
             ((System.ComponentModel.ISupportInitialize)dataGridView2).BeginInit();
             SuspendLayout();
@@ -99,8 +99,78 @@
             dataGridView1.Name = "dataGridView1";
             dataGridView1.RowHeadersBorderStyle = DataGridViewHeaderBorderStyle.Sunken;
             dataGridView1.RowHeadersVisible = false;
+            dataGridView1.RowTemplate.Height = 35;
             dataGridView1.Size = new Size(1318, 621);
             dataGridView1.TabIndex = 8;
+            dataGridView1.CellContentClick += dataGridView1_CellContentClick;
+            // 
+            // STT
+            // 
+            STT.HeaderText = "STT";
+            STT.Name = "STT";
+            STT.Width = 66;
+            // 
+            // MSNV
+            // 
+            MSNV.AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader;
+            MSNV.HeaderText = "MSNV";
+            MSNV.Name = "MSNV";
+            MSNV.ReadOnly = true;
+            MSNV.Width = 79;
+            // 
+            // HoTen
+            // 
+            HoTen.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
+            HoTen.HeaderText = "Họ Tên";
+            HoTen.Name = "HoTen";
+            HoTen.ReadOnly = true;
+            HoTen.SortMode = DataGridViewColumnSortMode.Programmatic;
+            HoTen.Width = 82;
+            // 
+            // Date
+            // 
+            Date.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
+            Date.HeaderText = "Ngày làm";
+            Date.Name = "Date";
+            Date.ReadOnly = true;
+            Date.Width = 91;
+            // 
+            // WorkHour
+            // 
+            WorkHour.AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader;
+            WorkHour.HeaderText = "Giờ làm";
+            WorkHour.Name = "WorkHour";
+            WorkHour.Width = 63;
+            // 
+            // ExtraHour
+            // 
+            ExtraHour.AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader;
+            ExtraHour.HeaderText = "Làm thêm";
+            ExtraHour.Name = "ExtraHour";
+            ExtraHour.Width = 96;
+            // 
+            // Absent
+            // 
+            Absent.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
+            Absent.HeaderText = "Vắng";
+            Absent.Items.AddRange(new object[] { "", "P", "VR", "TU", "BH" });
+            Absent.Name = "Absent";
+            Absent.Resizable = DataGridViewTriState.True;
+            Absent.SortMode = DataGridViewColumnSortMode.Automatic;
+            Absent.Width = 71;
+            // 
+            // ToNhom
+            // 
+            ToNhom.HeaderText = "Tổ Nhóm";
+            ToNhom.Name = "ToNhom";
+            ToNhom.ReadOnly = true;
+            ToNhom.Width = 92;
+            // 
+            // Note
+            // 
+            Note.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            Note.HeaderText = "Ghi chú";
+            Note.Name = "Note";
             // 
             // tab1
             // 
@@ -205,11 +275,11 @@
             // dateTimePicker1
             // 
             dateTimePicker1.CalendarFont = new Font("Comic Sans MS", 18F, FontStyle.Regular, GraphicsUnit.Point, 0);
-            dateTimePicker1.Font = new Font("Arial", 9F, FontStyle.Regular, GraphicsUnit.Point, 0);
+            dateTimePicker1.Font = new Font("Arial", 18F, FontStyle.Regular, GraphicsUnit.Point, 0);
             dateTimePicker1.Format = DateTimePickerFormat.Short;
-            dateTimePicker1.Location = new Point(12, 138);
+            dateTimePicker1.Location = new Point(12, 126);
             dateTimePicker1.Name = "dateTimePicker1";
-            dateTimePicker1.Size = new Size(99, 21);
+            dateTimePicker1.Size = new Size(144, 35);
             dateTimePicker1.TabIndex = 9;
             dateTimePicker1.ValueChanged += dateTimePicker1_ValueChanged;
             // 
@@ -250,10 +320,11 @@
             dataGridViewCellStyle4.WrapMode = DataGridViewTriState.False;
             dataGridView2.DefaultCellStyle = dataGridViewCellStyle4;
             dataGridView2.GridColor = Color.DarkOrchid;
-            dataGridView2.Location = new Point(162, 238);
+            dataGridView2.Location = new Point(162, 236);
             dataGridView2.Name = "dataGridView2";
             dataGridView2.RowHeadersBorderStyle = DataGridViewHeaderBorderStyle.Sunken;
             dataGridView2.RowHeadersVisible = false;
+            dataGridView2.RowTemplate.Height = 35;
             dataGridView2.Size = new Size(1318, 621);
             dataGridView2.TabIndex = 12;
             dataGridView2.Visible = false;
@@ -373,73 +444,6 @@
             btnExportNS.UseVisualStyleBackColor = true;
             btnExportNS.Visible = false;
             btnExportNS.Click += btnExportNS_Click;
-            // 
-            // STT
-            // 
-            STT.HeaderText = "STT";
-            STT.Name = "STT";
-            STT.Width = 66;
-            // 
-            // MSNV
-            // 
-            MSNV.AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader;
-            MSNV.HeaderText = "MSNV";
-            MSNV.Name = "MSNV";
-            MSNV.ReadOnly = true;
-            MSNV.Width = 79;
-            // 
-            // HoTen
-            // 
-            HoTen.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            HoTen.HeaderText = "Họ Tên";
-            HoTen.Name = "HoTen";
-            HoTen.ReadOnly = true;
-            HoTen.SortMode = DataGridViewColumnSortMode.Programmatic;
-            HoTen.Width = 88;
-            // 
-            // Date
-            // 
-            Date.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            Date.HeaderText = "Ngày làm";
-            Date.Name = "Date";
-            Date.ReadOnly = true;
-            Date.Width = 99;
-            // 
-            // WorkHour
-            // 
-            WorkHour.AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader;
-            WorkHour.HeaderText = "Giờ làm";
-            WorkHour.Name = "WorkHour";
-            WorkHour.Width = 91;
-            // 
-            // ExtraHour
-            // 
-            ExtraHour.AutoSizeMode = DataGridViewAutoSizeColumnMode.ColumnHeader;
-            ExtraHour.HeaderText = "Làm thêm";
-            ExtraHour.Name = "ExtraHour";
-            ExtraHour.Width = 104;
-            // 
-            // Absent
-            // 
-            Absent.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            Absent.HeaderText = "Vắng";
-            Absent.Items.AddRange(new object[] { "", "P", "VR", "TU", "BH" });
-            Absent.Name = "Absent";
-            Absent.Resizable = DataGridViewTriState.True;
-            Absent.SortMode = DataGridViewColumnSortMode.Automatic;
-            Absent.Width = 71;
-            // 
-            // ToNhom
-            // 
-            ToNhom.HeaderText = "Tổ Nhóm";
-            ToNhom.Name = "ToNhom";
-            ToNhom.ReadOnly = true;
-            // 
-            // Note
-            // 
-            Note.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
-            Note.HeaderText = "Ghi chú";
-            Note.Name = "Note";
             // 
             // chamcong
             // 

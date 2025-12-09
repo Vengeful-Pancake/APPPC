@@ -484,7 +484,7 @@ namespace APPPC.Functions
             var refCtrl = buttons.FirstOrDefault(b => b != null && b.Visible) ?? buttons[0];
             int y = refCtrl.Top;
 
-            for (int i = buttons.Length - 1; i >= 0; i--)
+            for (int i = buttons.Length - 1; i >= 0; i--)                                                                        
             {
                 var btn = buttons[i];
                 if (btn == null || btn.IsDisposed) continue;
@@ -512,6 +512,11 @@ namespace APPPC.Functions
         private void btnExportNS_Click(object sender, EventArgs e)
         {
             CC_Helpers.ExportHelper.ExportNSToExcel(dateTimePicker1);
+        }
+
+        private void dataGridView1_CellContentClick(object sender, DataGridViewCellEventArgs e)
+        {
+
         }
     }
 }
